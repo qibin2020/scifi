@@ -2,7 +2,9 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2604.13180-b31b1b.svg)](https://arxiv.org/abs/2604.13180)
 
-Define tasks in markdown. Agents execute them in isolated containers. Independent reviewers verify the results.
+`SciFi: Process the dataset, run this paper method, generate the plots, and make sure you reproduce all the paper results exactly. Suggest what we can optimize and submit SLURM jobs to test—I’ll decide what to try next.`
+
+`SciFi: Read the board manual, understand the interface, find the data on disk, write the RTL to implement the algorithm, and make sure all tests 100% pass. I’ll need it ready for the experiment tomorrow.`
 
 ## Talk to It
 
@@ -11,7 +13,7 @@ SciFi "run the hello test"
 SciFi "create a task that trains MNIST on GPU"
 SciFi "what tasks have I run?"
 SciFi -- "run task_xxx"         # skip confirmation
-SciFi help
+SciFi help                      # actually you don't need "" if shell is happy
 ```
 
 `SciFi` is the natural language interface — just say what you want. For direct commands: `SciF RUN`, `SciF MAKE`, `SciF ASK`, `SciF STATUS`.
