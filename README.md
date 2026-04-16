@@ -1,4 +1,6 @@
-# SciF — Autonomous Agent System
+# SciFi — Autonomous Agent System for SCIentific Workloads with an LLM-Native Interface
+
+[![arXiv](https://img.shields.io/badge/arXiv-2604.13180-b31b1b.svg)](https://arxiv.org/abs/2604.13180)
 
 Define tasks in markdown. Agents execute them in isolated containers. Independent reviewers verify the results.
 
