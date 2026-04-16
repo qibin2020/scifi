@@ -1,6 +1,9 @@
 export BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PATH=$BASEDIR:$PATH
 
+## System defaults
+export TMPDIR=${TMPDIR:-/tmp}
+
 ## Paths
 export APPTAINER=/cvmfs/atlas.cern.ch/repo/containers/sw/apptainer/x86_64-el10/current/bin/apptainer
 export SIF=$BASEDIR/Kam/rl9_micromamba_0.sif
@@ -11,7 +14,11 @@ export SKILLS_SRC=$BASEDIR/Nam/skills
 export RANK_SRC=$BASEDIR/Pam/gateway.rank.yaml
 
 ## Gateway
-[[ -f ${BASEDIR}/.secret.sh ]] && chmod 600 ${BASEDIR}/.secret.sh
+if [[ ! -f ${BASEDIR}/.secret.sh ]]; then
+    echo "ERROR: ${BASEDIR}/.secret.sh not found. Copy from .secret.sh.template and fill in your keys." >&2
+    return 1 2>/dev/null || exit 1
+fi
+chmod 600 ${BASEDIR}/.secret.sh
 . ${BASEDIR}/.secret.sh
 export GATEWAY_PORT=$(( ($(id -u) % 55535) + 10000 ))
 # export LITELLM_MASTER_KEY=   # leave unset → litellm runs without master key auth

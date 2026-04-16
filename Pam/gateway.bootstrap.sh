@@ -116,7 +116,7 @@ else
     echo "=== Building gateway.sif ==="
     OLD_CWD="$PWD"
     cd "$PAM"
-    APPTAINER_TMPDIR="$TMPDIR" $APPTAINER build --tmpdir "$TMPDIR" gateway.sif gateway.def 2>&1
+    APPTAINER_TMPDIR="${TMPDIR:-/tmp}" $APPTAINER build --tmpdir "${TMPDIR:-/tmp}" gateway.sif gateway.def 2>&1
     cd "$OLD_CWD"
     if [ ! -f "$FINAL" ]; then
         echo "ERROR: gateway.sif not created. Build failed." >&2
