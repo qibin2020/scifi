@@ -10,6 +10,7 @@ export SKILLS_SRC=$BASEDIR/Nam/skills
 export RANK_SRC=$BASEDIR/Pam/gateway.rank.yaml
 
 ## Gateway
+[[ -f ${BASEDIR}/.secret.sh ]] && chmod 600 ${BASEDIR}/.secret.sh
 . ${BASEDIR}/.secret.sh
 export GATEWAY_PORT=$(( ($(id -u) % 55535) + 10000 ))
 # export LITELLM_MASTER_KEY=   # leave unset → litellm runs without master key auth

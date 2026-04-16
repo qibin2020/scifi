@@ -17,7 +17,8 @@ SciFi help
 ## Setup
 
 ```bash
-vi .secret.sh                   # set ANTHROPIC_API_KEY and BEDROCK_API_KEY
+vi .secret.sh                   # set your API keys
+chmod 600 .secret.sh            # required — ENV.sh enforces this
 source ENV.sh
 SciF BOOTSTRAP                  # first time only
 SciFi "start and run test_hello"
@@ -33,8 +34,11 @@ cp -r ~/.ssh F/home/
 Create `Sam/tasks/<name>/top.md`:
 
 ```markdown
-# My Task
+---
 Rank: 1
+---
+
+# My Task
 
 ## Context
 What the agent needs to know.
@@ -56,11 +60,13 @@ All behavior is controlled through metadata in `top.md` — you never edit drive
 | `ForceModel: name` | rank-based | Pin worker model (e.g. `llama4-scout`) |
 | `ControlModel: name` | highest | Pin review model (e.g. `qwen3-coder`) |
 | `Thinking: N` | off | Force thinking mode with N token budget |
-| `BashTime: N` | 300 | Max seconds per bash call. `-1` = unlimited |
+| `BashTime: N` | 600 | Max seconds per bash call. `-1` = unlimited |
 | `Skills: a, b` | auto | Skills to inject |
 | `NoMemory: on\|off` | `off` | Clean-room run: don't read global memory, don't write global history |
-| `CommonHome: ro\|rw\|disable` | `ro` | Shared home mount (`F/home/` → `/home`) |
+| `CommonHome: rw\|ro\|disable` | `rw` | Shared home mount (`F/home/` → `/home`) |
 | `CommonStorage: rw\|ro\|disable` | `rw` | Shared storage mount (`F/mnt/` → `/mnt`) |
+| `GPU: no\|local\|slurm\|on` | `no` | GPU policy |
+| `Slurm: off\|on` | `off` | SLURM submission access |
 
 ## Agent Environment
 
@@ -91,4 +97,12 @@ MAMBA_ROOT_PREFIX=/mnt/envs micromamba create -n shared python=3.12 -y
 Chat with `SciFi` to explore the system, or read:
 - `F/F.design.md` — Architecture, concurrency, recovery paths
 - `F/F.usage.md` — Commands, skills, evolution
-- `Pam/gateway.rank.yaml` — Model rankings
+- `Pam/gateway.rank.yaml` — Model rankings and budgets
+
+## Important Notice: LLM API, Ranks, and Budget
+
+By default, multiple models are configured at different ranks, suitable for daily use and load-balanced across providers. The system assumes you have AWS Bedrock, Anthropic, and Ollama Cloud API keys (Anthropic direct is disabled by default; Bedrock is the primary backend).
+
+To reproduce the paper results, set up at least Ollama Cloud API and keep only Gemma4 by setting all other models' budgets to 0 in `Pam/gateway.rank.yaml`.
+
+**Budget is per run, not cumulative** — it caps the number of API calls per task run, not across runs. This workflow is token-heavy due to iterative agent loops, so monitor your usage. Consider starting with subscription-based APIs (not pay-per-use) and cost-effective models. Refer to [LiteLLM documentation](https://docs.litellm.ai/) for detailed budget control.
