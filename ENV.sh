@@ -32,6 +32,10 @@ export FALLBACK_WORKING=fallback
 ## SCIFI_MODEL: hardcoded model or group name for the SciFi natural language interface
 export SCIFI_MODEL=ui
 
+## Default env skill (auto-injected when a task declares no env skill)
+## One of: common_env | local_env | temp_env
+export DEFAULT_ENV_SKILL=temp_env
+
 ## Driver — limits
 export MAX_ITERATIONS=50
 export CHECKPOINT_EVERY=5

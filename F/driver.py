@@ -118,6 +118,17 @@ def _resolve_control_model(control_model):
 _skills = {}       # name -> {"description": str, "tool": dict, "execute": callable}
 _skill_catalog = ""  # one-line-per-skill summary for prescan
 
+# Env skills and hardcoded fallback (used when DEFAULT_ENV_SKILL is missing,
+# e.g. the user deleted it from Nam/skills/).
+_ENV_SKILLS = ("common_env", "local_env", "temp_env")
+_ENV_FALLBACK_PROMPT = (
+    "---\nEnv fallback: no env skill loaded. The container system env is "
+    "read-only — install packages under /tmp/mamba_env using micromamba "
+    "(pre-installed on PATH). After creating an env, write env.sh in the "
+    "task dir exporting MAMBA_ROOT_PREFIX, CONDA_PREFIX, PATH, and "
+    "LD_LIBRARY_PATH so subsequent bash calls auto-activate."
+)
+
 
 def _parse_skill_yaml(text):
     """Parse skill.yaml manifest. Returns {name, description, tool}."""
@@ -490,11 +501,11 @@ def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
     skills = [s for s in plan.get("skills", suggested_skills) if s in _skills]
 
     # Auto-inject default env skill if none declared.
-    # Every task should have env guidance. DEFAULT_ENV_SKILL (from ENV.sh)
-    # controls which skill to inject; defaults to "local_env".
-    _env_skills = {"common_env", "local_env", "temp_env"}
-    if not (set(skills) & _env_skills):
-        default_env = os.environ.get("DEFAULT_ENV_SKILL", "local_env")
+    # DEFAULT_ENV_SKILL (from ENV.sh) picks which one; if it's missing from
+    # _skills (user deleted it), skill_context rendering adds a hardcoded
+    # fallback prompt pointing at /tmp.
+    if not (set(skills) & set(_ENV_SKILLS)):
+        default_env = os.environ.get("DEFAULT_ENV_SKILL", "temp_env")
         if default_env in _skills:
             skills.append(default_env)
 
@@ -1902,6 +1913,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
     selected_skills = plan.get("skills", [])
     task_tools = list(TOOLS)
     skill_context = []
+    env_skill_loaded = False
     for sk in selected_skills:
         if sk not in _skills:
             continue
@@ -1910,6 +1922,10 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             task_tools.append(s["tool"])
         elif s["type"] == "context":
             skill_context.append(f"---\nSkill: {sk}\n{s['content'][:CAP_TASK]}")
+        if sk in _ENV_SKILLS:
+            env_skill_loaded = True
+    if not env_skill_loaded:
+        skill_context.append(_ENV_FALLBACK_PROMPT)
 
     _history(task_dir, "PRESCAN", depth,
         rank=plan["rank"], subtasks=len(plan.get("subtasks", [])),

@@ -107,11 +107,16 @@ Agents run in isolated Apptainer containers. Three Python environment variants a
 
 | Variant | Skill | Location | Persistent | Use case |
 |---------|-------|----------|-----------|----------|
-| **common** | `common_env` | `/mnt/` (host under `F/mnt/`) | Yes | Default. Shared across tasks, reused if exists |
+| **temp** | `temp_env` | `$TMPDIR` | No | **Default.** Throwaway, discarded on exit |
 | **local** | `local_env` | `./` (task dir under `F/tasks/`) | Yes | Per-task, isolated from other tasks |
-| **temp** | `temp_env` | `$TMPDIR` | No | Throwaway, discarded on exit |
+| **common** | `common_env` | `/mnt/` (host under `F/mnt/`) | Yes | Shared across tasks, reused if exists |
 
-If no env skill is declared, `local_env` is auto-inferred. The `common_env` skill handles shared environment discovery and reuse — agents reuse an existing environment at `/mnt/` or create a new one, but never modify an existing one.
+If no env skill is declared, the skill named by `DEFAULT_ENV_SKILL` in `ENV.sh` is auto-injected (default `temp_env`). The `common_env` skill handles shared environment discovery and reuse — agents reuse an existing environment at `/mnt/` or create a new one, but never modify an existing one. If no env skill is available (e.g. all deleted from `Nam/skills/`), the driver falls back to a hardcoded prompt pointing the agent at `/tmp/mamba_env`.
+
+The `local_env` variant is useful for debugging: its `mamba_env/` persists in the task dir, so you can keep inspecting and working on it. After a run, `cd F/tasks/<task>_<ts>` and either:
+
+- `source env.sh` — activate the env directly on the host to contiue work on what agents left, or
+- `bash $BASEDIR/F/F.debug.sh` — drop into an interactive shell in the same container the agent ran in (task dir at `/srv`, `/mnt` and `/home` mounted as during the run, `env.sh` auto-sourced).
 
 ## Output and State
 
@@ -162,6 +167,7 @@ Chat with `SciFi` to explore the system (e.g. `task maker` and `skill maker`), o
 | `GATEWAY_PORT` | Auto-derived from UID, no manual setup needed |
 | `FALLBACK_HIGHEST`, `FALLBACK_WORKING` | Fallback model groups when rank config is unavailable |
 | `SCIFI_MODEL` | Model group for the SciFi natural language interface |
+| `DEFAULT_ENV_SKILL` | Env skill auto-injected when a task declares none (`temp_env` / `local_env` / `common_env`) |
 | `MAX_ITERATIONS`, `MAX_DEPTH`, `MAX_RETRIES` | Agent loop limits |
 | `WALL_LIMIT_PER_RANK`, `ITER_LIMIT_PER_RANK` | Per-rank time and iteration budgets (comma-separated, rank 0 to 5) |
 | `TOTAL_WALL_PER_RANK` | Hard wall-clock cap per rank |

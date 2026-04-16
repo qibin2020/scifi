@@ -132,6 +132,7 @@ Full system ready
 | `gateway.rank.yaml missing` | SciF BOOTSTRAP auto-generates from secret.yaml |
 | Gateway won't start | `bash Pam/gateway.debug.sh` (foreground with full logs) |
 | SciFi rule-based only | Gateway not running — SciF START |
+| Continue a task manually | `cd F/tasks/<task>_<ts> && bash $BASEDIR/F/F.debug.sh` (drops you in the same container, `env.sh` auto-sourced, GPU auto-detected) |
 
 ---
 
@@ -307,17 +308,24 @@ Run the build and diagnose any failures from build.log
 
 See `RD/rtfl_ab_test.md` for full analysis.
 
-### Shared environment skills
+### Environment skills
 
-Heavy software (ROOT ~1 GB, PyTorch ~2 GB) is slow to install. Env skills
-automate **discovery → verify → reuse or create** of shared envs at
+Every task gets one of three env skills injected. If the task declares none,
+the driver auto-injects `DEFAULT_ENV_SKILL` from `ENV.sh` (default `temp_env`).
+If that skill is missing from `Nam/skills/`, a minimal hardcoded prompt
+pointing at `/tmp/mamba_env` is appended instead — always isolated and
+ephemeral, since the container's `/tmp` is a fresh per-run bind that's
+discarded on exit.
+
+| Skill | Install location | Persists | Typical use |
+|-------|------------------|----------|-------------|
+| `temp_env` (default) | `/tmp/mamba_env` | No — dies with container | Throwaway runs, keeps task dir clean |
+| `local_env` | `./mamba_env` (task dir) | Yes, within the task dir | Per-task isolated env |
+| `common_env` | `/mnt/sci_envs/<prefix>` | Yes, across tasks | Heavy stacks (ROOT, PyTorch) reused across tasks |
+
+Heavy software (ROOT ~1 GB, PyTorch ~2 GB) is slow to install. `common_env`
+automates **discovery → verify → reuse or create** of shared envs at
 `/mnt/sci_envs/<name>/`.
-
-**Available env skills:**
-
-| Skill | What it manages | Pre-bundles |
-|-------|-----------------|-------------|
-| `common_env` | Any domain (ROOT, ML, geo, astro, …) | User-specified per task |
 
 **Rule: reuse or create new — never modify an existing env.**
 

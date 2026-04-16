@@ -102,6 +102,7 @@ $BASEDIR/
 │   ├── RESET.sh            # Clean runtime, keep data
 │   ├── F.bootstrap.sh      # Create overlay + install Python env
 │   ├── F.overlay.img       # 2GB ext2 overlay (Python + openai + requests)
+│   ├── F.debug.sh          # Interactive container shell (continue a task manually)
 │   ├── F.design.md         # This file (technical reference)
 │   ├── F.usage.md          # Usage guide (SciFi reads this)
 │   ├── .misc/              # Archived/superseded scripts
@@ -458,12 +459,29 @@ activation is handled via `env.sh` in the task directory:
 - If `env.sh` does not exist, commands run with bare system PATH
 - Agents write `env.sh` after discovering or creating an environment (guided by
   env skills: `common_env`, `local_env`, `temp_env`). If no env skill is declared,
-  `local_env` is auto-injected (configurable via `DEFAULT_ENV_SKILL`)
+  the skill named by `DEFAULT_ENV_SKILL` in `ENV.sh` is auto-injected (default
+  `temp_env`). If that skill is missing from `Nam/skills/` (deleted), the driver
+  appends a minimal hardcoded fallback prompt pointing at `/tmp/mamba_env`,
+  which is always isolated and ephemeral (container `/tmp` is a fresh per-run
+  bind, discarded on exit)
 - Shared pre-built envs live at `/mnt/sci_envs/` (verilator, root, pytorch, etc.)
 - Error recovery: malformed env.sh produces visible errors; agent can fix or delete it
 
 Replaces the old `AGENT_TOOLCHAIN_PATH` mechanism which polluted all tasks with
 all envs' binaries indiscriminately.
+
+**Interactive debug shell**: `F/F.debug.sh` opens a shell in the same container
+the agent ran in, for continuing work on a task manually.
+
+```
+cd F/tasks/<task>_<ts>
+bash $BASEDIR/F/F.debug.sh
+```
+
+- `$PWD → /srv` (also `HOME` and cwd); `F/mnt → /mnt`, `F/home → /home` (only if they exist); fresh `/tmp`
+- Overlay mounted `ro`, driver micromamba env activated
+- Auto-sources `/srv/env.sh` if present — bare `python`/`gcc`/... resolve to the agent's env (for `temp_env` runs the `/tmp/mamba_env` it points at is already gone)
+- GPU auto-detect follows the same rule as `portal.py`: respect `CUDA_VISIBLE_DEVICES` if set, else use `nvidia-smi`; pass `--nv` whenever any GPU is visible, and echo what was detected
 
 ### 6.6 GPU Metadata
 
@@ -613,8 +631,10 @@ At driver startup: scan `SKILLS_DIR` for subdirectories.
 1. Task .md declares: `Skills: text_stats, NERSC_slurm`
 2. Prescan sees catalog + task hints → selects skills in plan
 3. **Default env skill**: if no env skill (`common_env`, `local_env`, `temp_env`) is
-   declared, the system auto-injects `DEFAULT_ENV_SKILL` (from ENV.sh, default `local_env`).
-   Every task gets env guidance — agents always know where to install packages.
+   declared, the system auto-injects `DEFAULT_ENV_SKILL` (from ENV.sh, default `temp_env`).
+   If that skill is missing from `Nam/skills/`, the driver appends a hardcoded fallback
+   prompt guiding the agent to `/tmp/mamba_env`. Every task gets env guidance — agents
+   always know where to install packages.
 4. `_run_sam` builds tools: `TOOLS + selected tool skills`
 5. Context skills injected into user message
 6. Worker only sees assigned skills (closed environment)
