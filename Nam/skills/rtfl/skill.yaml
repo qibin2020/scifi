@@ -1,5 +1,5 @@
 name: rtfl
-description: Read The F***ing Log — structured log parser. Extracts signal from large logs without dumping everything into context. ALWAYS start with mode=skeleton, then grep or slice to zoom in. Never cat an entire log.
+description: Read The ******* Log — structured log parser. Extracts signal from large logs without dumping everything into context. ALWAYS start with mode=skeleton, then grep or slice to zoom in. Never cat an entire log.
 tool:
   name: rtfl
   description: Parse a log file and extract useful information. Start with skeleton mode (errors, warnings, exit codes, stack traces, head, tail). Then grep for patterns or slice for line ranges. Never read an entire log with read_file — use this tool instead.
