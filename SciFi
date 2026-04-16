@@ -59,10 +59,13 @@ def _check_secret():
     with open(secret) as f:
         if "<SETME>" in f.read():
             return False, "has <SETME> placeholders"
-    for var in ("ANTHROPIC_API_KEY", "BEDROCK_API_KEY"):
-        val = os.environ.get(var, "")
-        if not val or val == "<SETME>":
-            return False, f"env {var} is unset or '<SETME>'"
+    # Check that at least one API key referenced in model yaml is set
+    import re
+    with open(secret) as f:
+        keys_needed = sorted(set(re.findall(r'os\.environ/(\w+)', f.read())))
+    keys_set = [k for k in keys_needed if os.environ.get(k, "") not in ("", "<SETME>")]
+    if not keys_set:
+        return False, f"no API keys set (need at least one of: {', '.join(keys_needed)})"
     return True, "ok"
 
 def _is_bootstrapped():

@@ -29,15 +29,20 @@ if grep -q '<SETME>' "$SECRET"; then
     grep -n '<SETME>' "$SECRET" | sed 's/^/    /' >&2
     exit 1
 fi
-# Check that API-key env vars referenced in the secret yaml are set and not placeholder
-for _key_var in ANTHROPIC_API_KEY BEDROCK_API_KEY; do
+# Check that at least one API-key env var referenced in model yaml is set
+_keys_needed=$(grep -oP 'os\.environ/\K\w+' "$SECRET" | sort -u)
+_any_set=false
+for _key_var in $_keys_needed; do
     _val="${!_key_var:-}"
-    if [ -z "$_val" ] || [ "$_val" = "<SETME>" ]; then
-        echo "ERROR: $_key_var is unset or still '<SETME>'." >&2
-        echo "  export $_key_var=<your-real-key>" >&2
-        exit 1
+    if [ -n "$_val" ] && [ "$_val" != "<SETME>" ]; then
+        _any_set=true
     fi
 done
+if [ "$_any_set" = false ]; then
+    echo "ERROR: no API keys are set. Need at least one of:" >&2
+    echo "$_keys_needed" | sed 's/^/  /' >&2
+    exit 1
+fi
 
 # Check rank config — auto-generate if missing
 RANK="$PAM/gateway.rank.yaml"
