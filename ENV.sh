@@ -1,4 +1,5 @@
 export BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PATH=$BASEDIR:$PATH
 
 ## Paths
 export APPTAINER=/cvmfs/atlas.cern.ch/repo/containers/sw/apptainer/x86_64-el10/current/bin/apptainer
