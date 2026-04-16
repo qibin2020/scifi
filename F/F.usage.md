@@ -18,8 +18,8 @@ You (natural language)  →  SciFi  →  SciF  →  module .sh  →  .py (in con
 ## Quick Start
 
 ```bash
-# First time — set API keys in ENV.sh then bootstrap
-#   1. Edit ENV.sh: set ANTHROPIC_API_KEY and BEDROCK_API_KEY
+# First time — set API keys in .secret.sh then bootstrap
+#   1. cp .secret.sh.template .secret.sh && vi .secret.sh
 #   2. source ENV.sh
 #   3. Run:
 SciFi bootstrap             # or: SciF BOOTSTRAP
@@ -95,7 +95,7 @@ SciF EVOLVE <suggest|model>          # run evolution (code mode disabled)
 
 1. **Apptainer** — container runtime. Path set in `ENV.sh` as `APPTAINER=`.
    Check: `apptainer --version`. On NERSC: `/cvmfs/atlas.cern.ch/.../apptainer`
-2. **API keys** — `ANTHROPIC_API_KEY` and `BEDROCK_API_KEY` set in `ENV.sh` (no `<SETME>`)
+2. **API keys** — at least one provider key set in `.secret.sh` (sourced by `ENV.sh`)
 
 ### Dependency chain
 
@@ -104,7 +104,7 @@ Apptainer binary exists
   ↓
 Kam: rl9_micromamba_0.sif (container image)
   ↓
-ENV.sh: ANTHROPIC_API_KEY + BEDROCK_API_KEY set
+.secret.sh: at least one API key set (sourced by ENV.sh)
   ↓
 Pam: gateway.model.yaml (references keys via os.environ/)
   ↓
@@ -128,7 +128,7 @@ Full system ready
 |---------|-----|
 | `apptainer not found` | Check ENV.sh APPTAINER path, or `module load apptainer` |
 | `gateway.model.yaml not found` | `cp Pam/gateway.model.yaml.template Pam/gateway.model.yaml` |
-| `<SETME> in secret` | Edit ENV.sh, set `ANTHROPIC_API_KEY` and `BEDROCK_API_KEY`, then `source ENV.sh` |
+| `<SETME> in secret` | Edit `.secret.sh`, set at least one API key, then `source ENV.sh` |
 | `gateway.rank.yaml missing` | SciF BOOTSTRAP auto-generates from secret.yaml |
 | Gateway won't start | `bash Pam/gateway.debug.sh` (foreground with full logs) |
 | SciFi rule-based only | Gateway not running — SciF START |
@@ -462,17 +462,14 @@ Configurable via `ITER_LIMIT_PER_RANK`, `WALL_LIMIT_PER_RANK`, `TOTAL_WALL_PER_R
 
 Models ranked in `Pam/gateway.rank.yaml`. Selection: highest rank ≤ task rank, config order priority within same rank, budget-aware.
 
-Current ranks (benchmark-validated 2026-04):
+Current ranks (see `Pam/gateway.rank.yaml` for authoritative list):
 
 | Rank | Models |
 |------|--------|
-| 4 | claude-opus |
-| 3 | claude-sonnet |
-| 2 | qwen3-coder, llama3-3-70b, **gemma4**, claude-haiku |
-| 1 | llama4-scout, qwen3-32b |
-| 0 | deepseek-v3, qwen3-next-80b, llama4-maverick, kimi-k2 |
+| 3 | claude-opus (disabled by default) |
+| 2 | **gemma4**, qwen3-coder, claude-haiku (disabled by default) |
+| 0 | deepseek-v3, kimi-k2, qwen3-next-80b |
 | -1 | gpt-oss (no tools) |
-| -2 | deepseek-r1, kimi-k2-thinking (reasoning-only) |
 
 ### Two canonical configurations
 

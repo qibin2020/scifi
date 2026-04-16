@@ -32,7 +32,7 @@ case "$ACTION" in
         # approval on this account for opus/sonnet — without this, boto3
         # defaults to us-east-1 (unapproved) and returns the misleading
         # "use case form not submitted" control-plane error.
-        for _ev in LITELLM_MASTER_KEY ANTHROPIC_API_KEY BEDROCK_API_KEY OLLAMA_API_KEY AWS_REGION AWS_DEFAULT_REGION; do
+        for _ev in LITELLM_MASTER_KEY ANTHROPIC_API_KEY BEDROCK_API_KEY OLLAMA_API_KEY OPENAI_API_KEY GEMINI_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY GROQ_API_KEY TOGETHERAI_API_KEY FIREWORKS_AI_API_KEY AZURE_API_KEY AZURE_API_BASE AWS_REGION AWS_DEFAULT_REGION; do
             if [ -n "${!_ev:-}" ]; then
                 ENV_FLAGS+=(--env "$_ev=${!_ev}")
             fi
