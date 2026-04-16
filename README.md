@@ -21,6 +21,7 @@ SciFi help                      # actually you don't need "" if shell is happy
 ## Setup
 
 ```bash
+cp .secret.sh.template .secret.sh
 vi .secret.sh                   # set your API keys
 chmod 600 .secret.sh            # required — ENV.sh enforces this
 source ENV.sh
