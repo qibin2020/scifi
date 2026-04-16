@@ -1,8 +1,12 @@
 export BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PATH=$BASEDIR:$PATH
 
+## System defaults
+export TMPDIR=${TMPDIR:-/tmp}
+
 ## Paths
-export APPTAINER=/cvmfs/atlas.cern.ch/repo/containers/sw/apptainer/x86_64-el10/current/bin/apptainer
+# export APPTAINER=/cvmfs/atlas.cern.ch/repo/containers/sw/apptainer/x86_64-el10/current/bin/apptainer
+export APPTAINER=$(which apptainer)
 export SIF=$BASEDIR/Kam/rl9_micromamba_0.sif
 export OVERLAY=$BASEDIR/F/F.overlay.img
 export FDIR=$BASEDIR/F
@@ -11,16 +15,22 @@ export SKILLS_SRC=$BASEDIR/Nam/skills
 export RANK_SRC=$BASEDIR/Pam/gateway.rank.yaml
 
 ## Gateway
-[[ -f ${BASEDIR}/.secret.sh ]] && chmod 600 ${BASEDIR}/.secret.sh
+if [[ ! -f ${BASEDIR}/.secret.sh ]]; then
+    echo "ERROR: ${BASEDIR}/.secret.sh not found. Copy from .secret.sh.template and fill in your keys." >&2
+    return 1 2>/dev/null || exit 1
+fi
+chmod 600 ${BASEDIR}/.secret.sh
 . ${BASEDIR}/.secret.sh
 export GATEWAY_PORT=$(( ($(id -u) % 55535) + 10000 ))
 # export LITELLM_MASTER_KEY=   # leave unset → litellm runs without master key auth
 
-## Fallback models (only hardcoded model names in the system)
-## Used when the ranking system (gateway.rank.yaml) is unavailable
-export FALLBACK_HIGHEST=fallback_high
+## Fallback model groups (hardcoded model names in the system)
+## FALLBACK_HIGHEST/FALLBACK_WORKING: used when ranking system (gateway.rank.yaml) is unavailable
+## See Pam/gateway.model.yaml for supported model names. Models sharing same name become group, supported for load balancing and high availability.
+export FALLBACK_HIGHEST=fallback
 export FALLBACK_WORKING=fallback
-export SCIFI_MODEL=scifi_model
+## SCIFI_MODEL: hardcoded model or group name for the SciFi natural language interface
+export SCIFI_MODEL=ui
 
 ## Driver — limits
 export MAX_ITERATIONS=50

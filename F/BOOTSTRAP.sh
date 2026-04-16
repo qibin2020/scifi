@@ -25,7 +25,7 @@ _kill_gw() {
     if [ -n "$_GW_PID" ]; then
         # Kill the process group (shell + apptainer + litellm)
         kill -- -"$_GW_PID" 2>/dev/null || kill "$_GW_PID" 2>/dev/null
-        wait "$_GW_PID" 2>/dev/null
+        wait "$_GW_PID" 2>/dev/null || true
         _GW_PID=""
     fi
 }
@@ -33,8 +33,8 @@ _kill_gw() {
 setsid bash "$BASEDIR/Pam/gateway.debug.sh" >/dev/null 2>&1 &
 _GW_PID=$!
 GW_READY=false
-for i in $(seq 1 30); do
-    if curl -sf "http://localhost:${GATEWAY_PORT}/health" >/dev/null 2>&1; then
+for i in $(seq 1 60); do
+    if curl -sf -m 3 "http://localhost:${GATEWAY_PORT}/health" >/dev/null 2>&1; then
         GW_READY=true; break
     fi
     if ! kill -0 "$_GW_PID" 2>/dev/null; then
@@ -43,7 +43,7 @@ for i in $(seq 1 30); do
     sleep 1
 done
 if ! $GW_READY; then
-    _kill_gw; _step_fail "Gateway did not become healthy within 30s."
+    _kill_gw; _step_fail "Gateway did not become healthy within 60s."
 fi
 MODELS=$(curl -sf "http://localhost:${GATEWAY_PORT}/v1/models" 2>/dev/null | python3 -c "
 import sys, json; print(len(json.load(sys.stdin).get('data', [])))" 2>/dev/null || echo "0")
@@ -69,8 +69,8 @@ if [ -d "$TASKS_SRC/test_hello" ]; then
     setsid bash "$BASEDIR/Pam/gateway.debug.sh" >/dev/null 2>&1 &
     _GW_PID=$!
     trap '_kill_gw' EXIT
-    for i in $(seq 1 30); do
-        curl -sf "http://localhost:${GATEWAY_PORT}/health" >/dev/null 2>&1 && break
+    for i in $(seq 1 60); do
+        curl -sf -m 3 "http://localhost:${GATEWAY_PORT}/health" >/dev/null 2>&1 && break
         sleep 1
     done
     python3 "$BASEDIR/F/portal.py" driver test_hello || { _kill_gw; _step_fail "Smoke test failed."; }

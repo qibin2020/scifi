@@ -207,14 +207,12 @@ Models are ranked in `gateway.rank.yaml` (benchmark-validated 2026-04):
 
 ```
 Rank < 0: no tool support (text-only usage)
-  Rank -2: reasoning-only — review fallback, deep thinking (deepseek-r1, kimi-k2-thinking)
-  Rank -1: cheap text — history indexing, text compaction, demoted models (gpt-oss, mistral-large)
+  Rank -2: reasoning-only — review fallback, deep thinking
+  Rank -1: cheap text — history indexing, text compaction (gpt-oss)
 Rank >= 0: tool-capable (worker, tool-based review)
-  Rank  0: backup — chatty or slow (deepseek-v3, qwen3-next-80b, llama4-maverick, kimi-k2)
-  Rank  1: lean fast workers — 100% bench success (llama4-scout, qwen3-32b)
-  Rank  2: best — work + control capable, lean (qwen3-coder, llama3-3-70b, claude-haiku)
-  Rank  3: premium thinkable (claude-sonnet)
-  Rank  4: top-tier thinkable (claude-opus)
+  Rank  0: backup — reliable but slow (deepseek-v3, kimi-k2, qwen3-next-80b)
+  Rank  2: best — work + control capable (gemma4, qwen3-coder, claude-haiku)
+  Rank  3: top-tier premium thinkable (claude-opus)
 
 Ranks are dynamic — evolution adjusts based on observed performance.
 ```
@@ -422,8 +420,8 @@ Task .md can override: `Timeout: 120`
 
 Hard clock limit to prevent runaway tasks:
 ```
-TOTAL_WALL_PER_RANK = "300,600,1200,1800,3600,3600"
-# rank 0: 5min, rank 1: 10min, rank 2: 20min, rank 3: 30min, rank 4+: 1hr
+TOTAL_WALL_PER_RANK = "1800,1800,1800,1800,1800,1800"
+# all ranks: 30min (uniform hard cap)
 ```
 
 This catches tasks where bash calls consume hours while LLM time stays low.
@@ -432,8 +430,8 @@ This catches tasks where bash calls consume hours while LLM time stays low.
 
 Lower ranks get fewer iterations — a rank-0 task needing 50 iterations is misranked:
 ```
-ITER_LIMIT_PER_RANK = "10,20,30,40,50,50"
-# rank 0: 10 iters, rank 1: 20, ..., rank 4+: 50
+ITER_LIMIT_PER_RANK = "10,20,30,30,50,50"
+# rank 0: 10 iters, rank 1: 20, rank 2-3: 30, rank 4+: 50
 ```
 
 When review escalates rank on retry, the new (higher) limits apply automatically.
@@ -889,8 +887,8 @@ Per-job env overrides (benchmarks / parallel runs):
 | `MAX_PARALLEL_AGENTS` | 4 | Concurrent subtask limit |
 | `MAX_BASH_TIME` | 300 | Global bash timeout cap |
 | `WALL_LIMIT_PER_RANK` | 60,120,240,300,360,600 | Per-rank LLM-only wall limit (excludes bash) |
-| `ITER_LIMIT_PER_RANK` | 10,20,30,40,50,50 | Per-rank iteration cap |
-| `TOTAL_WALL_PER_RANK` | 300,600,1200,1800,3600,3600 | Per-rank total wall limit (incl. bash) |
+| `ITER_LIMIT_PER_RANK` | 10,20,30,30,50,50 | Per-rank iteration cap |
+| `TOTAL_WALL_PER_RANK` | 1800,1800,1800,1800,1800,1800 | Per-rank total wall limit (incl. bash) |
 | `SKILLS_DIR` | ./skills | Skill library path |
 | `MAX_EVOLVE_ITER` | 20 | Evolution iteration limit |
 
@@ -1189,7 +1187,7 @@ Guide:       SciFi <question> (one-shot, read-only)
     ↓
   Kam: container SIF (rl9_micromamba_0.sif)
     ↓
-  ENV.sh: ANTHROPIC_API_KEY + BEDROCK_API_KEY set
+  .secret.sh: at least one API key set (sourced by ENV.sh)
     ↓
   Pam: gateway.model.yaml references keys via os.environ/
     ↓
@@ -1233,7 +1231,7 @@ in order and stops on first failure.
 [1/4] Pam bootstrap (gateway.bootstrap.sh)
   ├─ Check: APPTAINER exists + executable
   ├─ Check: gateway.model.yaml exists + no <SETME>
-  ├─ Check: ANTHROPIC_API_KEY + BEDROCK_API_KEY env vars set and not <SETME>
+  ├─ Check: at least one API key set in .secret.sh (sourced by ENV.sh)
   ├─ Auto-generate gateway.rank.yaml if missing
   ├─ Pull precursor SIF (skip if exists)
   ├─ Build gateway.sif from gateway.def (skip if exists)

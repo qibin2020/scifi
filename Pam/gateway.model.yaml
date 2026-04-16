@@ -1,158 +1,223 @@
 model_list:
-  # ── claude-haiku group ──
-  # Bedrock pinned to us-east-2 (Anthropic use-case approved region).
-  # Anthropic-direct fallback disabled (rpm=0, budget exhausted).
-  - model_name: claude-haiku
-    litellm_params:
-      model: bedrock/converse/us.anthropic.claude-haiku-4-5-20251001-v1:0
-      api_key: os.environ/BEDROCK_API_KEY
-      aws_region_name: us-east-2
-    model_info:
-      priority: 0
+  # ── claude-haiku (Bedrock + Anthropic) ──
+  # - model_name: claude-haiku
+  #   litellm_params:
+  #     model: bedrock/converse/us.anthropic.claude-haiku-4-5-20251001-v1:0
+  #     api_key: os.environ/BEDROCK_API_KEY
+  #     aws_region_name: us-east-2
+  #   model_info:
+  #     priority: 0
+  # - model_name: claude-haiku
+  #   litellm_params:
+  #     model: anthropic/claude-haiku-4-5-20251001
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+  #   model_info:
+  #     priority: 1
 
-  - model_name: claude-haiku
-    litellm_params:
-      model: anthropic/claude-haiku-4-5-20251001
-      api_key: os.environ/ANTHROPIC_API_KEY
-      rpm: 0
-    model_info:
-      priority: 1
+  # ── claude-opus (Bedrock + Anthropic) ──
+  # - model_name: claude-opus
+  #   litellm_params:
+  #     model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
+  #     api_key: os.environ/BEDROCK_API_KEY
+  #     aws_region_name: us-east-2
+  #   model_info:
+  #     priority: 0
+  # - model_name: claude-opus
+  #   litellm_params:
+  #     model: anthropic/claude-opus-4-6
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+  #   model_info:
+  #     priority: 1
 
-  # ── claude-opus group ──
-  # Bedrock us-east-2. Anthropic-direct disabled (rpm=0).
-  - model_name: claude-opus
-    litellm_params:
-      model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
-      api_key: os.environ/BEDROCK_API_KEY
-      aws_region_name: us-east-2
-    model_info:
-      priority: 0
-
-  - model_name: claude-opus
-    litellm_params:
-      model: anthropic/claude-opus-4-6
-      api_key: os.environ/ANTHROPIC_API_KEY
-      rpm: 0
-    model_info:
-      priority: 1
-
-  # ── gemma4 (Ollama Cloud only) ──
+  # ── gemma4 (Ollama Cloud) ──
   - model_name: gemma4
     litellm_params:
       model: openai/gemma4:31b-cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
 
-  # ── llama4-scout (Bedrock only) ──
-  - model_name: llama4-scout
+  # ── qwen3-coder (Ollama Cloud) ──
+  - model_name: qwen3-coder
     litellm_params:
-      model: bedrock/converse/us.meta.llama4-scout-17b-instruct-v1:0
-      api_key: os.environ/BEDROCK_API_KEY
+      model: openai/qwen3-coder:480b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
 
-  # ── deepseek-v3 (Bedrock only) ──
+  # ── deepseek-v3 (Ollama Cloud via v3.2) ──
   - model_name: deepseek-v3
     litellm_params:
-      model: bedrock/converse/deepseek.v3.2
-      api_key: os.environ/BEDROCK_API_KEY
+      model: openai/deepseek-v3.2:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
 
-  # ── gpt-oss group ──
-  # Bedrock active; Ollama Cloud disabled (rpm=0).
-  # 0% tool calls in RD bench — rank -1, fallback only.
-  - model_name: gpt-oss
+  # ── kimi-k2 (Ollama Cloud) ──
+  - model_name: kimi-k2
     litellm_params:
-      model: bedrock/converse/openai.gpt-oss-120b-1:0
-      api_key: os.environ/BEDROCK_API_KEY
-    model_info:
-      priority: 0
+      model: openai/kimi-k2:1t-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+
+  # ── qwen3-next-80b (Ollama Cloud) ──
+  - model_name: qwen3-next-80b
+    litellm_params:
+      model: openai/qwen3-next:80b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+
+  # ── gpt-oss (Ollama Cloud) ──
   - model_name: gpt-oss
     litellm_params:
       model: openai/gpt-oss:120b-cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
-      rpm: 0
-    model_info:
-      priority: 1
 
-  # ── deepseek-r1 (Bedrock only, reasoning-only) ──
-  - model_name: deepseek-r1
-    litellm_params:
-      model: bedrock/converse/us.deepseek.r1-v1:0
-      api_key: os.environ/BEDROCK_API_KEY
-
-
-  # ── fallback group (working horse) ──
-  # Priority cascade: Opus → deepseek-v3
+  # ── fallback (tool-capable models, rank 0+) ──
   - model_name: fallback
     litellm_params:
-      model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
-      api_key: os.environ/BEDROCK_API_KEY
+      model: openai/gemma4:31b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
     model_info:
       priority: 0
-
   - model_name: fallback
     litellm_params:
-      model: anthropic/claude-opus-4-6
-      api_key: os.environ/ANTHROPIC_API_KEY
+      model: openai/qwen3-coder:480b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      priority: 1
+  - model_name: fallback
+    litellm_params:
+      model: openai/deepseek-v3.2:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      priority: 1
+  - model_name: fallback
+    litellm_params:
+      model: openai/kimi-k2:1t-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      priority: 1
+  - model_name: fallback
+    litellm_params:
+      model: openai/qwen3-next:80b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
     model_info:
       priority: 1
 
-  - model_name: fallback
+  # ── ui (all models, for SciFi interface) ──
+  - model_name: ui
     litellm_params:
-      model: bedrock/converse/deepseek.v3.2
-      api_key: os.environ/BEDROCK_API_KEY
-    model_info:
-      priority: 2
-
-  # ── fallback_high group (critical: review, pre-scan, ask) ──
-  # Opus → deepseek-v3.
-  - model_name: fallback_high
-    litellm_params:
-      model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
-      api_key: os.environ/BEDROCK_API_KEY
+      model: openai/gemma4:31b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
     model_info:
       priority: 0
-
-  - model_name: fallback_high
+  - model_name: ui
     litellm_params:
-      model: anthropic/claude-opus-4-6
-      api_key: os.environ/ANTHROPIC_API_KEY
+      model: openai/qwen3-coder:480b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      priority: 1
+  - model_name: ui
+    litellm_params:
+      model: openai/deepseek-v3.2:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      priority: 1
+  - model_name: ui
+    litellm_params:
+      model: openai/kimi-k2:1t-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      priority: 1
+  - model_name: ui
+    litellm_params:
+      model: openai/qwen3-next:80b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      priority: 1
+  - model_name: ui
+    litellm_params:
+      model: openai/gpt-oss:120b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
     model_info:
       priority: 1
 
-  - model_name: fallback_high
-    litellm_params:
-      model: bedrock/converse/deepseek.v3.2
-      api_key: os.environ/BEDROCK_API_KEY
-    model_info:
-      priority: 2
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Provider examples — one model per provider, showing the call format.
+  # Uncomment and adjust model_name to integrate.
+  # See: https://docs.litellm.ai/docs/providers
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  # ── scifi_model group (SciFi user interface) ──
-  # Load-balanced across all kept models for max availability.
-  - model_name: scifi_model
-    litellm_params:
-      model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
-      api_key: os.environ/BEDROCK_API_KEY
+  # ── OpenAI ──
+  # - model_name: gpt-4o
+  #   litellm_params:
+  #     model: openai/gpt-4o
+  #     api_key: os.environ/OPENAI_API_KEY
 
-  - model_name: scifi_model
-    litellm_params:
-      model: anthropic/claude-opus-4-6
-      api_key: os.environ/ANTHROPIC_API_KEY
+  # ── Google Gemini ──
+  # - model_name: gemini-2.5-flash
+  #   litellm_params:
+  #     model: gemini/gemini-2.5-flash-preview-05-20
+  #     api_key: os.environ/GEMINI_API_KEY
 
-  - model_name: scifi_model
-    litellm_params:
-      model: anthropic/claude-haiku-4-5-20251001
-      api_key: os.environ/ANTHROPIC_API_KEY
+  # ── Mistral ──
+  # - model_name: mistral-large
+  #   litellm_params:
+  #     model: mistral/mistral-large-latest
+  #     api_key: os.environ/MISTRAL_API_KEY
 
-  - model_name: scifi_model
-    litellm_params:
-      model: bedrock/converse/deepseek.v3.2
-      api_key: os.environ/BEDROCK_API_KEY
+  # ── DeepSeek (direct API) ──
+  # - model_name: deepseek-chat
+  #   litellm_params:
+  #     model: deepseek/deepseek-chat
+  #     api_key: os.environ/DEEPSEEK_API_KEY
 
-  - model_name: scifi_model
-    litellm_params:
-      model: bedrock/converse/us.deepseek.r1-v1:0
-      api_key: os.environ/BEDROCK_API_KEY
+  # ── Groq ──
+  # - model_name: llama-70b-groq
+  #   litellm_params:
+  #     model: groq/llama-3.3-70b-versatile
+  #     api_key: os.environ/GROQ_API_KEY
 
+  # ── Together AI ──
+  # - model_name: qwen-72b-together
+  #   litellm_params:
+  #     model: together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo
+  #     api_key: os.environ/TOGETHERAI_API_KEY
+
+  # ── Fireworks AI ──
+  # - model_name: qwen-72b-fireworks
+  #   litellm_params:
+  #     model: fireworks_ai/accounts/fireworks/models/qwen2p5-72b-instruct
+  #     api_key: os.environ/FIREWORKS_AI_API_KEY
+
+  # ── OpenRouter ──
+  # - model_name: claude-sonnet-or
+  #   litellm_params:
+  #     model: openrouter/anthropic/claude-sonnet-4
+  #     api_key: os.environ/OPENROUTER_API_KEY
+
+  # ── Azure OpenAI ──
+  # - model_name: gpt-4o-azure
+  #   litellm_params:
+  #     model: azure/gpt-4o-deployment-name
+  #     api_key: os.environ/AZURE_API_KEY
+  #     api_base: os.environ/AZURE_API_BASE
+
+  # ── Local Ollama (self-hosted) ──
+  # - model_name: local-llama
+  #   litellm_params:
+  #     model: ollama/llama3.3:70b
+  #     api_base: http://localhost:11434
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
