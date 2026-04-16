@@ -152,9 +152,9 @@ Chat with `SciFi` to explore the system (e.g. `task maker` and `skill maker`), o
 - `ENV.sh` — Central configuration and hard-coded things
 
 
-### Configuration
+### Technical details of Configuration
 
-`ENV.sh` is the central configuration file — every script and entry point sources it first. It sets all paths, driver limits, and model group names. Key sections:
+`ENV.sh` is the central configuration file — every script and entry point sources it first. It sets all paths, driver limits, and model group names. Key sections and **in most cases no need to change anything**:
 
 | Variable | Purpose |
 |----------|---------|
@@ -186,5 +186,5 @@ All secrets live in `.secret.sh` (sourced by `ENV.sh`, never committed). Copy th
 
 **SSH keys for agents**: agents run in isolated containers and cannot access your host `~/.ssh` by default. To give them access (e.g. for cloning private repos), copy your keys into the shared home directory or prepare your own agent-only keys. It is mounted at `/home/` inside the container when `CommonHome` is enabled (default `rw`). Keep `F/home/.ssh` out of version control — it is already in `.gitignore`.
 
-Treat these Credentials carefully! They can in principle read by the agents/LLM/cloud provider
+Treat these credentials carefully! They can in principle be read by the agents/LLM/cloud providers.
 
