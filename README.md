@@ -109,7 +109,7 @@ Agents run in isolated Apptainer containers. Three Python environment variants a
 |---------|-------|----------|-----------|----------|
 | **common** | `common_env` | `/mnt/` (host under `F/mnt/`) | Yes | Default. Shared across tasks, reused if exists |
 | **local** | `local_env` | `./` (task dir under `F/tasks/`) | Yes | Per-task, isolated from other tasks |
-| **temp** | `temp_env` | RAM overlay | No | Throwaway, discarded on exit |
+| **temp** | `temp_env` | `$TMPDIR` | No | Throwaway, discarded on exit |
 
 If no env skill is declared, `local_env` is auto-inferred. The `common_env` skill handles shared environment discovery and reuse — agents reuse an existing environment at `/mnt/` or create a new one, but never modify an existing one.
 

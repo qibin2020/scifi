@@ -1071,7 +1071,7 @@ $BASEDIR/                           ← ENV.sh sets this
 ├── /mnt/                           ← bind $FDIR/mnt (CommonStorage: rw|ro|disable)
 │   └── (shared data, reusable envs, datasets)
 ├── /cam/                           ← bind $CAM_DIR :rw  (PERSISTENT, conditional)
-├── /tmp/                           ← bind $TMPDIR :rw
+├── /tmp/                           ← bind fresh `$TMPDIR/scif_tmp_*` :rw (per-run, cleaned on exit)
 ├── /usr/bin/sbatch,...             ← bind host SLURM :ro
 └── (everything else)               ← SIF + overlay (read-only) + writable-tmpfs (disposable)
 ```
@@ -1080,7 +1080,7 @@ $BASEDIR/                           ← ENV.sh sets this
 - `./` (task dir) — persistent, task-specific outputs go here
 - `/mnt/` — persistent shared storage (if CommonStorage != disable)
 - `/home/` — depends on CommonHome: ro = writes go to tmpfs (discarded), rw = persistent
-- `/tmp/` — writable but not persistent across runs
+- `/tmp/` — writable, per-run host dir under `$TMPDIR` (isolated between concurrent runs, removed when the container exits)
 - Everything else — writable-tmpfs absorbs writes silently (discarded on exit)
 
 #### portal.py evolution profile → `/srv` namespace
@@ -1156,7 +1156,7 @@ Minimal — gateway only needs its config file.
 | `/srv/gateway.rank.yaml` | Yes (evolution only) | Bound to `$RANK_SRC` — model config |
 | `/srv/driver.py` | Yes (evolution code only) | Bound to `$FDIR/driver.py` rw |
 | `/srv/Sam/` or `/srv/Nam/` (makers) | Yes | Bound to `$BASEDIR/Sam` or `Nam` — writes output |
-| `/tmp/` | Session | Bound to `$TMPDIR` — survives container but not job |
+| `/tmp/` | No | Per-run fresh dir under `$TMPDIR` (`scif_tmp_*`) — removed by portal.py after the container exits |
 | Everything else | No | writable-tmpfs — RAM-backed, lost on container exit |
 
 ---

@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -289,6 +290,40 @@ def create_run_dir(task_name, profile_name):
 # Profile Definitions
 # ============================================================
 
+_created_tmp_dirs = []
+
+def _host_tmp_bind():
+    """Fresh per-run host dir for container /tmp (prevents cross-task collisions).
+
+    Tracked in _created_tmp_dirs for cleanup after the container exits.
+    """
+    base = os.environ.get("TMPDIR", "/tmp")
+    d = tempfile.mkdtemp(prefix="scif_tmp_", dir=base)
+    _created_tmp_dirs.append(d)
+    return d
+
+
+def _cleanup_tmp_dirs():
+    """Remove ONLY the per-run tmp dirs we created. Multiple safety gates."""
+    base_real = os.path.realpath(os.environ.get("TMPDIR", "/tmp"))
+    for d in _created_tmp_dirs:
+        # All gates must pass — err on the side of leaving the dir behind.
+        if not d or not isinstance(d, str):
+            continue
+        if not os.path.basename(d).startswith("scif_tmp_"):
+            continue
+        if os.path.islink(d) or not os.path.isdir(d):
+            continue
+        real = os.path.realpath(d)
+        if os.path.dirname(real) != base_real:
+            continue
+        try:
+            shutil.rmtree(real)
+        except OSError as e:
+            print("[portal] warn: failed to remove %s: %s" % (real, e),
+                  file=sys.stderr)
+
+
 def _mamba_init(env_name):
     """Shell snippet to activate micromamba env inside container."""
     return (
@@ -380,8 +415,7 @@ def build_driver_cmd(task_name, extra_args):
     if cam_dir:
         binds.append((cam_dir, "/cam", "rw"))
 
-    tmpdir = os.environ.get("TMPDIR", "/tmp")
-    binds.append((tmpdir, "/tmp", "rw"))
+    binds.append((_host_tmp_bind(), "/tmp", "rw"))
 
     # Home mount
     passwd_home = os.path.expanduser("~")
@@ -478,7 +512,7 @@ def build_evolution_cmd(extra_args):
     cam_dir = _env_opt("CAM_DIR")
     if cam_dir:
         binds.append((cam_dir, "/cam", "rw"))
-    binds.append((os.environ.get("TMPDIR", "/tmp"), "/tmp", "rw"))
+    binds.append((_host_tmp_bind(), "/tmp", "rw"))
 
     env = {
         "GATEWAY_URL": "http://localhost:%s" % _env("GATEWAY_PORT"),
@@ -525,7 +559,7 @@ def build_ask_cmd(extra_args):
     cam_dir = _env_opt("CAM_DIR")
     if cam_dir:
         binds.append((cam_dir, "/cam", "rw"))
-    binds.append((os.environ.get("TMPDIR", "/tmp"), "/tmp", "rw"))
+    binds.append((_host_tmp_bind(), "/tmp", "rw"))
 
     env = {
         "GATEWAY_URL": "http://localhost:%s" % _env("GATEWAY_PORT"),
@@ -634,8 +668,12 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
-    # Execute
-    os.execvp(cmd[0], cmd)
+    # Execute (subprocess, not execvp, so we can clean up our host tmp dirs).
+    try:
+        rc = subprocess.call(cmd)
+    finally:
+        _cleanup_tmp_dirs()
+    sys.exit(rc)
 
 
 if __name__ == "__main__":
