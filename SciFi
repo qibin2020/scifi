@@ -1,0 +1,797 @@
+#!/usr/bin/env python3
+"""SciFi — intelligent entry point for the SciF system.
+
+Flow:
+  1. Rule-based pre-checks (apptainer, secret, bootstrap)
+  2. LLM decides action from user intent + F.usage.md
+  3. Direct commands → execute + hookback interpretation
+     Interactive commands → hand off to user terminal
+     Suggest-only commands → print reason, user runs manually
+  4. Concise conclusion from captured output
+
+Stdlib only. No container needed.
+"""
+
+import sys, os, json, re, time, subprocess, urllib.request, urllib.error
+
+BASEDIR = os.path.dirname(os.path.abspath(__file__))
+
+# --- Cam ---
+
+_cam_file = None
+
+def _cam_init():
+    global _cam_file
+    cam_dir = os.path.join(BASEDIR, "Cam")
+    try:
+        os.makedirs(cam_dir, exist_ok=True)
+        _cam_file = os.path.join(cam_dir, f"scifi_{time.strftime('%Y%m%d%H%M%S')}.jsonl")
+    except Exception:
+        pass
+
+def _cam(event, **data):
+    if not _cam_file:
+        return
+    try:
+        record = {"ts": time.strftime('%Y-%m-%dT%H:%M:%S'), "event": event}
+        record.update(data)
+        with open(_cam_file, "a") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except Exception:
+        pass
+
+# --- Rule-based pre-checks ---
+
+def _check_apptainer():
+    env_path = os.path.join(BASEDIR, "ENV.sh")
+    apptainer = "/cvmfs/atlas.cern.ch/repo/containers/sw/apptainer/x86_64-el10/current/bin/apptainer"
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith("export APPTAINER="):
+                    apptainer = line.split("=", 1)[1].strip()
+    return os.path.isfile(apptainer), apptainer
+
+def _check_secret():
+    secret = os.path.join(BASEDIR, "Pam", "gateway.model.yaml")
+    if not os.path.isfile(secret):
+        return False, "not found"
+    with open(secret) as f:
+        if "<SETME>" in f.read():
+            return False, "has <SETME> placeholders"
+    for var in ("ANTHROPIC_API_KEY", "BEDROCK_API_KEY"):
+        val = os.environ.get(var, "")
+        if not val or val == "<SETME>":
+            return False, f"env {var} is unset or '<SETME>'"
+    return True, "ok"
+
+def _is_bootstrapped():
+    """Check if all three key artifacts exist."""
+    return (os.path.isfile(os.path.join(BASEDIR, "Kam", "rl9_micromamba_0.sif"))
+            and os.path.isfile(os.path.join(BASEDIR, "Pam", "gateway.sif"))
+            and os.path.isfile(os.path.join(BASEDIR, "F", "F.overlay.img")))
+
+def _pre_check():
+    """Rule-based checks before LLM. Returns error string or None."""
+    ok, path = _check_apptainer()
+    if not ok:
+        return (
+            f"Apptainer not found at {path}\n\n"
+            "  Fix: check ENV.sh APPTAINER path, or: module load apptainer\n"
+            "  Then: SciF BOOTSTRAP"
+        )
+    ok, reason = _check_secret()
+    if not ok:
+        return (
+            f"Pam/gateway.model.yaml {reason}\n\n"
+            "  Fix: cp Pam/gateway.model.yaml.template Pam/gateway.model.yaml\n"
+            "       Edit and fill in your LLM API keys\n"
+            "  Then: SciF BOOTSTRAP"
+        )
+    return None
+
+# --- Gateway + LLM ---
+
+def _gateway_port():
+    return (os.getuid() % 55535) + 10000
+
+MODEL = os.environ.get("SCIFI_MODEL", "fallback_ui")
+
+def _load_usage():
+    path = os.path.join(BASEDIR, "F", "F.usage.md")
+    try:
+        with open(path) as f:
+            return f.read()[:12000]
+    except Exception:
+        return "(F.usage.md not found)"
+
+GATEWAY_PORT = _gateway_port()
+GATEWAY_URL = f"http://localhost:{GATEWAY_PORT}"
+USAGE_DOC = _load_usage()
+
+# Command safety classification — canonical definitions are below (~line 417).
+# EVOLVE suggest=direct, EVOLVE model/code=suggest-only.
+# Fence sets floor; LLM can raise but never lower restrictiveness.
+
+DECIDE_PROMPT = (
+    "You are SciFi, the intelligent entry point for the SciF system.\n\n"
+    "Given the user's message, decide what to do. Reply with ONLY a JSON object:\n\n"
+    '{"action": "run", "command": "SciF CMD args"}\n'
+    "  → For clear, safe operations. SciFi will execute this.\n\n"
+    '{"action": "interactive", "command": "SciF CMD args"}\n'
+    "  → For MAKE or ASK (user takes over the terminal).\n\n"
+    '{"action": "suggest", "command": "SciF CMD args", "reason": "why manual"}\n'
+    "  → For risky ops (RESET, MAINTAIN, EVOLVE model/code). User runs it.\n\n"
+    '{"action": "answer", "text": "direct response"}\n'
+    "  → When no command needed (just answering a question).\n\n"
+    "## Safety rules\n"
+    "- Direct (auto-run): BOOTSTRAP, START, END, STATUS, RUN, JOBS, EVOLVE suggest\n"
+    "- Interactive (hand off): MAKE, ASK\n"
+    "- Suggest only: RESET, MAINTAIN, EVOLVE model\n"
+    "- Forbidden: EVOLVE code (warn, never auto-run or suggest)\n"
+    "- If not bootstrapped, always run BOOTSTRAP first\n"
+    "- NEVER include ; | & or shell escapes in commands\n\n"
+    "## MAKE rules\n"
+    "- If user gives a SPECIFIC description (mentions what to do, tools, data),\n"
+    "  use interactive MAKE — the description is passed as initial input.\n"
+    "- If user is VAGUE ('make a task', 'create something'), use answer mode\n"
+    "  and tell them: write a description in a .md file, then SciF MAKE <file>.\n"
+    "  Or they can describe more specifically and SciFi will start the maker.\n\n"
+    "## System documentation\n" + USAGE_DOC + "\n\n"
+    "Reply with JSON only. No markdown, no explanation outside the JSON.\n\n"
+    "REMINDER — exact command syntax (copy exactly, do NOT abbreviate):\n"
+    "  SciF BOOTSTRAP\n"
+    "  SciF START\n"
+    "  SciF END\n"
+    "  SciF STATUS\n"
+    "  SciF RESET\n"
+    "  SciF MAINTAIN\n"
+    "  SciF RUN <task_name>\n"
+    "  SciF MAKE <description.md>\n"
+    "  SciF MAKE <description.md> --skill <skill_name>\n"
+    "  SciF ASK\n"
+    "  SciF JOBS\n"
+    "  SciF EVOLVE suggest\n"
+    "  SciF EVOLVE model\n"
+    "The command field MUST start with 'SciF ' followed by one of the above.\n"
+    "For answers without commands, use {\"action\": \"answer\", \"text\": \"...\"}.\n"
+)
+
+INTERPRET_PROMPT = (
+    "You are SciFi. A SciF command just finished. Given the output below, "
+    "write a 1-3 line conclusion for the user. Be very concise.\n"
+    "- If task done: say done + key metric (time, iterations)\n"
+    "- If failed: say what failed + where to look\n"
+    "- If suggestions: summarize the top 1-2\n"
+    "- Never repeat the full output. Just interpret.\n"
+)
+
+def _response_meta_raw(data):
+    """Extract audit metadata from a raw JSON response dict."""
+    meta = {}
+    meta["response_id"] = data.get("id")
+    meta["response_model"] = data.get("model")
+    meta["system_fingerprint"] = data.get("system_fingerprint")
+    meta["created"] = data.get("created")
+    usage = data.get("usage") or {}
+    if usage:
+        meta["prompt_tokens"] = usage.get("prompt_tokens")
+        meta["completion_tokens"] = usage.get("completion_tokens")
+        meta["total_tokens"] = usage.get("total_tokens")
+    choices = data.get("choices") or []
+    if choices:
+        meta["finish_reason"] = choices[0].get("finish_reason")
+    return meta
+
+
+def _llm_call(messages):
+    """Single model call via gateway. Returns reply or None. Retries once on timeout."""
+    payload = json.dumps({
+        "model": MODEL, "messages": messages, "max_tokens": 1024,
+    }).encode()
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(
+                GATEWAY_URL + "/v1/chat/completions",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+                reply = data["choices"][0]["message"]["content"]
+                _cam("llm", model=MODEL, reply=reply[:500],
+                     attempt=attempt, **_response_meta_raw(data))
+                return reply
+        except Exception:
+            if attempt == 0:
+                _cam("llm_retry", model=MODEL, reason="timeout_or_error")
+                continue
+            return None
+
+# --- Execute SciF command ---
+
+def _run_scif(command):
+    """Execute a SciF command. Streams output to terminal, captures tail for hookback.
+    Returns (exit_code, tail_output)."""
+    if not command.startswith("SciF "):
+        return 1, "Invalid command"
+    for bad in [";", "|", "&", "`", "$("]:
+        if bad in command:
+            return 1, f"Unsafe character in command: {bad}"
+
+    scif_path = os.path.join(BASEDIR, "SciF")
+    parts = command.split(None, 1)
+    cmd = f"{scif_path} {parts[1]}" if len(parts) > 1 else scif_path
+
+    try:
+        proc = subprocess.Popen(
+            cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True, cwd=BASEDIR,
+        )
+        lines = []
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            lines.append(line)
+        proc.wait()
+        # Keep tail for hookback interpretation
+        output = "".join(lines[-50:]).strip()
+        return proc.returncode, output
+    except Exception as e:
+        return 1, str(e)
+
+def _exec_interactive(command, user_msg=""):
+    """Hand off to user terminal (MAKE, ASK). Returns exit code.
+    For MAKE without a file: passes user's text via --desc so maker gets it as initial input."""
+    scif_path = os.path.join(BASEDIR, "SciF")
+    parts = command.split(None, 1)
+    cmd_args = parts[1] if len(parts) > 1 else ""
+
+    # For MAKE without a file arg: pass user's intent via --desc
+    if "MAKE" in cmd_args and user_msg and not any(cmd_args.endswith(ext) for ext in [".md", ".txt"]):
+        # Escape quotes in user message for shell
+        safe_msg = user_msg.replace("'", "'\\''")
+        if "--skill" in cmd_args:
+            # "MAKE --skill name" → "MAKE --desc '...' --skill name"
+            cmd_args = cmd_args.replace("MAKE", "MAKE --desc '%s'" % safe_msg, 1)
+        else:
+            cmd_args = cmd_args.replace("MAKE", "MAKE --desc '%s'" % safe_msg, 1)
+
+    cmd = "%s %s" % (scif_path, cmd_args)
+    print("  [SciFi] handing off to: SciF MAKE ...")
+    print("  " + "=" * 50)
+    try:
+        r = subprocess.run(cmd, shell=True, universal_newlines=True, cwd=BASEDIR)
+        return r.returncode
+    except Exception as e:
+        print("  [SciFi] error: %s" % e)
+        return 1
+
+# --- Help ---
+
+FIXED_HELP = """\
+SciF System — Quick Reference
+
+  SciFi <query>               Interactive mode (feedback prompt after run/make)
+  SciFi -- <query>            Batch mode (process and exit, no feedback)
+  SciFi help                  This help
+  SciFi help <topic>          Topic help (e.g. SciFi help gpu)
+
+  SciF BOOTSTRAP              First-time setup
+  SciF START / END            Start / stop LLM gateway
+  SciF STATUS                 Check system status (incl. GPU + SLURM)
+  SciF RUN <task>             Run a task (local or SLURM, auto-routed)
+  SciF JOBS                   Show active driver SLURM jobs + recent logs
+  SciF MAKE <desc.md>         Create a task (interactive)
+  SciF MAKE <d> --skill <n>   Create a skill (interactive)
+  SciF ASK                    Multi-turn agent chat
+  SciF EVOLVE <suggest|model> Run evolution
+  SciF MAINTAIN               Evolution + audit roll
+  SciF RESET                  Clean runtime (keep data)
+
+  GPU / SLURM (set in task top.md — driver.sh routes automatically):
+    GPU: no              never use GPU (default)
+    GPU: local           use host GPU only (error if none)
+    GPU: slurm           always submit to a SLURM GPU node
+    GPU: on              auto: local GPU if present, else SLURM
+    Slurm: off           local only (default)
+    Slurm: on            allow SLURM; dense jobs (BashTime:-1) auto-route
+
+  Workflow: SciFi → SciF → module .sh → .py (in container)
+  Docs:     F/F.usage.md (usage), F/F.design.md (technical)"""
+
+FIXED_HELP_GPU = """\
+GPU / SLURM Routing — set in task top.md, driver.sh routes automatically.
+
+  GPU: no (default)    Never use GPU. Task runs locally, no --nv.
+  GPU: local           Use host GPU only. Error if no nvidia-smi on host.
+  GPU: slurm           Always submit to a SLURM GPU node (1×A100, 32 CPUs).
+                       Overrides default Slurm: off. ERROR if explicit Slurm: off.
+  GPU: on              Auto — local GPU if present, else submit to SLURM.
+                       Requires Slurm: on when no local GPU.
+
+  Slurm: off (default) Run locally only.
+  Slurm: on            Allow SLURM submission. Dense workloads (BashTime: -1)
+                       auto-route to a CPU SLURM node even without GPU.
+
+  Optional:  SlurmHours: N (default 4)   SlurmCpus: N (default 32)
+
+  Env overrides (no top.md edit): GPU_FORCE, SLURM_FORCE, SLURM_HOURS, SLURM_CPUS
+
+  Examples in top.md:
+    GPU: local                       # train on the Jupyter GPU node
+    GPU: slurm                       # always sbatch a GPU node
+    GPU: on\\nSlurm: on              # auto: local or SLURM
+    GPU: no\\nSlurm: on\\nBashTime: -1  # CPU-dense → sbatch CPU node
+
+  Check: SciF STATUS (shows host GPU + sbatch availability)"""
+
+WELCOME = """\
+============================================================
+  Welcome to the SciF System!
+============================================================
+
+  You describe what you want. The system figures out how.
+
+  --- Talk to me (SciFi) ---
+  SciFi run test_hello                  Run a task
+  SciFi I want to train a model on GPU  Create a task from your idea
+  SciFi what is the rank system?        Ask about the system
+  SciFi help                            Full command reference
+
+  --- Or use SciF directly ---
+  SciF RUN <task>             Run a task (local or GPU/SLURM, auto)
+  SciF MAKE <desc.md>         Create a task interactively
+  SciF ASK                    Multi-turn agent chat (tools, debug)
+  SciF STATUS                 Check what's running + GPU/SLURM state
+
+  --- Batch mode (no feedback prompt) ---
+  SciFi -- <query>            Process and exit
+
+  --- When done ---
+  SciFi stop                  Stop the LLM gateway
+
+  System is ready. What would you like to do?
+============================================================"""
+
+def _welcome():
+    """Show welcome message. Use LLM to personalize if available, else fixed."""
+    summary = _llm_call([
+        {"role": "system", "content":
+            "The user just set up the SciF system for the first time. "
+            "Write a brief welcome (15 lines max). Include:\n"
+            "1. One-line what the system does\n"
+            "2. The 3 most important SciFi commands to try first\n"
+            "3. How to get help (SciFi help)\n"
+            "4. How to stop (SciFi stop)\n"
+            "Be friendly, concise. No markdown headers.\n\n" + USAGE_DOC},
+        {"role": "user", "content": "I just bootstrapped. What now?"},
+    ])
+    if summary:
+        return summary
+    return WELCOME
+
+
+def _help(topic=""):
+    """Try LLM summary, fall back to fixed help.
+    If topic is given, ask the LLM about that specific topic.
+    Deterministic fallback: topic-aware sections when gateway is down."""
+    if topic:
+        summary = _llm_call([
+            {"role": "system", "content":
+                "You are SciFi help. Answer the user's question about the SciF system "
+                "in 10-20 lines. Be specific and concise. Use the docs below.\n\n" + USAGE_DOC},
+            {"role": "user", "content": topic},
+        ])
+        if summary:
+            return summary
+        # Deterministic fallback: match topic to known sections
+        tl = topic.lower()
+        if any(kw in tl for kw in ("gpu", "slurm", "sbatch", "nvidia", "cuda")):
+            return FIXED_HELP_GPU
+        return FIXED_HELP
+    else:
+        summary = _llm_call([
+            {"role": "system", "content":
+                "Summarize the SciF system usage in 10-15 lines. "
+                "Show the most important commands and the typical workflow. "
+                "Be concise — one command per line, brief description.\n\n" + USAGE_DOC},
+            {"role": "user", "content": "help"},
+        ])
+        if summary:
+            return summary
+        return FIXED_HELP
+
+
+# --- Route 2 helpers: fence + classify ---
+
+KNOWN_CMDS = {
+    "BOOTSTRAP", "START", "END", "STATUS", "RESET", "MAINTAIN",
+    "RUN", "MAKE", "ASK", "EVOLVE", "JOBS", "help",
+}
+DIRECT_CMDS = {"BOOTSTRAP", "START", "END", "STATUS", "RUN", "JOBS", "help"}
+INTERACTIVE_CMDS = {"MAKE", "ASK"}
+SUGGEST_CMDS = {"RESET", "MAINTAIN"}
+# EVOLVE: suggest=direct, model=suggest, code=forbidden
+
+
+# Restrictiveness order: higher = more restrictive. Fence enforces a floor per
+# command type; the LLM can raise it but never lower it.
+_RESTRICTIVENESS = {"run": 0, "interactive": 1, "suggest": 2}
+
+
+def _fence_command(raw_command, llm_action):
+    """Validate, fix, and classify a command from LLM output.
+    Returns (action, command) where action is 'run', 'interactive', 'suggest', or None.
+    Takes the MORE restrictive of fence rule vs LLM intent."""
+    cmd = raw_command.strip()
+    if not cmd:
+        return None, ""
+
+    # Fix: add SciF prefix if missing
+    if not cmd.startswith("SciF "):
+        cmd = "SciF " + cmd
+
+    # Safety: reject shell metacharacters
+    for bad in [";", "|", "&", "`", "$("]:
+        if bad in cmd:
+            return None, ""
+
+    # Parse: "SciF CMD [args...]"
+    parts = cmd.split()
+    if len(parts) < 2:
+        return None, ""
+    scif_cmd = parts[1]
+
+    # Fix: bare task name → "SciF RUN <name>"
+    if scif_cmd not in KNOWN_CMDS:
+        cmd = "SciF RUN " + " ".join(parts[1:])
+        scif_cmd = "RUN"
+
+    # Classify: fence sets the minimum restrictiveness per command type
+    if scif_cmd in DIRECT_CMDS:
+        fence_action = "run"
+    elif scif_cmd in INTERACTIVE_CMDS:
+        fence_action = "interactive"
+    elif scif_cmd in SUGGEST_CMDS:
+        fence_action = "suggest"
+    elif scif_cmd == "EVOLVE":
+        mode = parts[2] if len(parts) > 2 else "suggest"
+        if mode == "suggest":
+            fence_action = "run"
+        else:  # model, code, unknown
+            fence_action = "suggest"
+    else:
+        fence_action = "suggest"
+
+    # Take the more restrictive of fence rule vs LLM intent.
+    # Fence is the floor (e.g. RESET is always at least suggest).
+    # LLM can raise it (e.g. flag injection as suggest) but never lower it.
+    llm_level = _RESTRICTIVENESS.get(llm_action, 0)
+    fence_level = _RESTRICTIVENESS.get(fence_action, 0)
+    if llm_level > fence_level:
+        return llm_action, cmd
+    return fence_action, cmd
+
+
+# --- Main flow: 3 routes ---
+
+def respond(user_msg):
+    # ================================================================
+    # ROUTE 1: Early stop (rule-based, no LLM)
+    # ================================================================
+
+    msg_lower = user_msg.lower().strip()
+    is_play = msg_lower in ("play", "plays", "let's play", "lets play")
+
+    # 1a. Pre-checks: apptainer, secret
+    err = _pre_check()
+    if err:
+        _cam("route1_precheck", error=err[:200])
+        if is_play:
+            return (
+                "Welcome! Almost there — one thing to set up first:\n\n" + err +
+                "\n\nOnce fixed, run: SciFi play"
+            )
+        return err
+
+    # 1b. Auto-bootstrap if not bootstrapped
+    if not _is_bootstrapped():
+        _cam("route1_bootstrap", user=user_msg)
+        print("  [SciFi] System not bootstrapped. Running SciF BOOTSTRAP...\n")
+        code, output = _run_scif("SciF BOOTSTRAP")
+        if code != 0:
+            return "Bootstrap failed:\n" + output[-500:]
+        print("")
+
+    # 1c. "play" magic word → welcome + help
+    if is_play:
+        return _welcome()
+
+    # 1d. Keyword shortcuts (work even without gateway)
+    if msg_lower in ("help", "?", "h", "scif help"):
+        return _help()
+    if msg_lower.startswith("help "):
+        return _help(user_msg[5:].strip())
+
+    SHORTCUTS = {
+        "start": "SciF START", "stop": "SciF END", "end": "SciF END",
+        "status": "SciF STATUS", "jobs": "SciF JOBS",
+    }
+    for keyword, cmd in SHORTCUTS.items():
+        if msg_lower == keyword or msg_lower == "scif " + keyword:
+            print("  [SciFi] " + cmd + " ...")
+            code, output = _run_scif(cmd)
+            return "" if code == 0 else "Command failed (exit %d)." % code
+
+    # ================================================================
+    # ROUTE 2 & 3: LLM decides (command or text answer)
+    # ================================================================
+
+    reply = _llm_call([
+        {"role": "system", "content": DECIDE_PROMPT},
+        {"role": "user", "content": user_msg},
+    ])
+
+    if not reply:
+        _cam("llm_unavailable", user=user_msg)
+        return (
+            "Gateway not reachable. Start it first:\n"
+            "  SciF START\n\n"
+            "Then retry: SciFi " + user_msg
+        )
+
+    # Parse LLM JSON
+    json_match = re.search(r'\{.*\}', reply, re.DOTALL)
+    if not json_match:
+        return reply  # Route 3: plain text
+
+    try:
+        decision = json.loads(json_match.group())
+    except json.JSONDecodeError:
+        return reply  # Route 3: plain text
+
+    _cam("llm_decision", raw=decision)
+
+    # ================================================================
+    # ROUTE 3: Text answer (no command)
+    # ================================================================
+
+    if decision.get("action") == "answer" or "command" not in decision:
+        return decision.get("text", reply)
+
+    # ================================================================
+    # ROUTE 2: SciF command (fence → classify → execute or suggest)
+    # ================================================================
+
+    raw_cmd = decision.get("command", "")
+    raw_action = decision.get("action", "run")
+    action, command = _fence_command(raw_cmd, raw_action)
+
+    if not action:
+        # Fence rejected the command — treat as text answer
+        return decision.get("text", reply)
+
+    _cam("fenced", action=action, command=command)
+
+    # 2a. Suggest only
+    if action == "suggest":
+        reason = decision.get("reason", "This command modifies system state. Run it yourself to confirm.")
+        return (
+            "Suggested command (run it yourself):\n"
+            "  " + command + "\n\n"
+            "  Why manual: " + reason
+        )
+
+    global _session_substantive, _session_task
+
+    # 2b. Interactive handoff
+    if action == "interactive":
+        _session_substantive = True
+        _exec_interactive(command, user_msg)
+        return ""
+
+    # 2c. Direct run + hookback
+    _session_substantive = True
+    print("  [SciFi] " + command + " ...")
+    code, output = _run_scif(command)
+    _cam("run_result", command=command, exit_code=code, output=output[:500])
+    # Track task name for feedback
+    task = _extract_task_from_output(output)
+    if task:
+        _session_task = task
+
+    # Rule-based hookback: detect known patterns before calling LLM
+    submitted = re.search(r'\[submitted\] (\S+) . job (\S+) . log: (\S+)', output)
+    if submitted:
+        task_name, job_id, log_path = submitted.groups()
+        return (
+            "Submitted %s to SLURM (job %s).\n"
+            "  Check:  squeue -j %s  |  tail -f %s\n"
+            "  Cancel: scancel %s\n"
+            "  Jobs:   SciF JOBS" % (task_name, job_id, job_id, log_path, job_id)
+        )
+
+    # Hookback: LLM interprets the output
+    interpretation = _llm_call([
+        {"role": "system", "content": INTERPRET_PROMPT},
+        {"role": "user", "content":
+            "Command: " + command + "\nExit code: %d\n\nOutput (tail):\n" % code + output},
+    ])
+
+    if interpretation:
+        return interpretation
+    return "Done." if code == 0 else "Failed (exit %d). Check output above." % code
+
+
+# --- Session tracking (for feedback) ---
+
+_session_task = None      # set during run if a task was executed
+_session_substantive = False  # True if run/interactive happened (feedback-worthy)
+
+def _extract_task_from_output(output):
+    """Extract task dir name from driver output like '[run] test_hello → .../test_hello_20260404...'"""
+    m = re.search(r'\[run\] \S+ . .*/(\S+_\d{14})', output)
+    return m.group(1) if m else None
+
+# --- Feedback collection ---
+
+def _collect_feedback(user_msg, comment):
+    """Collect session artifacts into Cam/FB_<uuid>_<datetime>.tgz"""
+    import uuid, tarfile, glob
+
+    cam_dir = os.path.join(BASEDIR, "Cam")
+    ts = time.strftime('%Y%m%d%H%M%S')
+    fb_id = "FB_%s_%s" % (str(uuid.uuid4())[:8], ts)
+    fb_dir = os.path.join(cam_dir, fb_id)
+    os.makedirs(fb_dir, exist_ok=True)
+
+    # Write feedback text
+    with open(os.path.join(fb_dir, "feedback.txt"), "w") as f:
+        f.write("User query: %s\n" % user_msg)
+        f.write("Comment: %s\n" % comment)
+        f.write("Time: %s\n" % time.strftime('%Y-%m-%d %H:%M:%S'))
+        if _session_task:
+            f.write("Task: %s\n" % _session_task)
+        if _cam_file:
+            f.write("Cam log: %s\n" % _cam_file)
+
+    # Identify available artifacts
+    artifacts = {}
+    artifacts["1"] = ("Feedback text", [os.path.join(fb_dir, "feedback.txt")])
+    if _cam_file and os.path.exists(_cam_file):
+        artifacts["2"] = ("SciFi session log", [_cam_file])
+    run_dir = os.path.join(BASEDIR, "F", "run")
+    if os.path.isdir(run_dir):
+        run_files = [os.path.join(run_dir, f) for f in os.listdir(run_dir) if f.endswith(".md")]
+        if run_files:
+            artifacts["3"] = ("Global run/ state", run_files)
+    if _session_task:
+        task_dir = os.path.join(BASEDIR, "F", "tasks", _session_task)
+        if os.path.isdir(task_dir):
+            # 4: dot files (.history.md, .memory.md, .suggestion.md, .history_index.md)
+            dot_files = [os.path.join(task_dir, f) for f in os.listdir(task_dir) if f.startswith(".")]
+            if dot_files:
+                artifacts["4"] = ("Task dot files (.history, .memory, .suggestion)", dot_files)
+            # 5: task-related Cam jsonl (match task name in filename)
+            task_base = _session_task.rsplit("_", 1)[0] if "_" in _session_task else _session_task
+            cam_jsonls = glob.glob(os.path.join(cam_dir, "*%s*.jsonl" % task_base))
+            if cam_jsonls:
+                artifacts["5"] = ("Task-related Cam logs", cam_jsonls)
+            # 6: task definition (non-dot .md files)
+            def_files = [os.path.join(task_dir, f) for f in os.listdir(task_dir)
+                         if f.endswith(".md") and not f.startswith(".")]
+            if def_files:
+                artifacts["6"] = ("Task definition (.md files)", def_files)
+
+    # Show choices
+    print("\n  --- Feedback artifacts ---")
+    for k in sorted(artifacts):
+        label, files = artifacts[k]
+        print("  [%s] %s (%d file%s)" % (k, label, len(files), "s" if len(files) != 1 else ""))
+    print("")
+    print("  Default: 1,2,3,4  (5 and 6 highly encouraged)")
+    selection = input("  Include [1,2,3,4]: ").strip()
+    if not selection:
+        selection = "1,2,3,4"
+
+    # Collect selected files
+    selected_keys = [s.strip() for s in selection.split(",")]
+    collected = []
+    for k in selected_keys:
+        if k in artifacts:
+            collected.extend(artifacts[k][1])
+
+    if not collected:
+        print("  No artifacts selected. Skipping.")
+        return
+
+    # Create tarball
+    tgz_path = os.path.join(cam_dir, fb_id + ".tgz")
+    with tarfile.open(tgz_path, "w:gz") as tar:
+        for fpath in collected:
+            if os.path.exists(fpath):
+                arcname = os.path.join(fb_id, os.path.relpath(fpath, BASEDIR))
+                tar.add(fpath, arcname=arcname)
+
+    # Summary
+    print("\n  --- Feedback collected ---")
+    print("  File: %s" % tgz_path)
+    print("  Contents:")
+    for k in selected_keys:
+        if k in artifacts:
+            print("    [%s] %s" % (k, artifacts[k][0]))
+    print("  Size: %s" % _human_size(os.path.getsize(tgz_path)))
+    print("")
+    print("  Submit this file for feedback. Thank you!")
+
+    # Cleanup temp dir
+    import shutil
+    shutil.rmtree(fb_dir, ignore_errors=True)
+
+
+def _human_size(nbytes):
+    for unit in ["B", "KB", "MB"]:
+        if nbytes < 1024:
+            return "%.1f %s" % (nbytes, unit)
+        nbytes /= 1024.0
+    return "%.1f GB" % nbytes
+
+
+# --- Entry point ---
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("SciFi — intelligent guide for the SciF system")
+        print("")
+        print("Usage:")
+        print("  SciFi <query>        Interactive mode (waits for feedback)")
+        print("  SciFi -- <query>     Batch mode (process and exit)")
+        print("")
+        print("Examples:")
+        print("  SciFi run test_hello")
+        print("  SciFi -- status")
+        print("  SciFi I want to train a neural network on GPU")
+        sys.exit(0)
+
+    _cam_init()
+
+    # Parse mode: "--" = batch, otherwise interactive
+    args = sys.argv[1:]
+    batch_mode = False
+    if args[0] == "--":
+        batch_mode = True
+        args = args[1:]
+    if not args:
+        print("No query provided.")
+        sys.exit(1)
+
+    user_msg = " ".join(args)
+    _cam("query", user=user_msg, mode="batch" if batch_mode else "interactive")
+    result = respond(user_msg)
+    if result:
+        print(result)
+
+    # Batch mode: exit immediately
+    if batch_mode:
+        sys.exit(0)
+
+    # Interactive mode: feedback only for substantive sessions (run, make, ask)
+    if not _session_substantive:
+        sys.exit(0)
+
+    print("")
+    print("  [Press Enter to exit, or type a comment to leave feedback]")
+    try:
+        comment = input("  > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        comment = ""
+
+    if not comment:
+        sys.exit(0)
+
+    # User left a comment — collect feedback
+    _cam("feedback", comment=comment)
+    print("")
+    print("  Thank you for the feedback!")
+    _collect_feedback(user_msg, comment)

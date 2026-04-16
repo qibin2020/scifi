@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# SciF — scripted entry point for always_young system.
+# Usage: SciF <command> [args...]
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ENV.sh"
+
+_ok()   { echo "  [ok] $*"; }
+_fail() { echo "  [fail] $*" >&2; }
+_hint() { echo "  [hint] $*"; }
+
+_gateway_running() {
+    $APPTAINER instance list 2>/dev/null | grep -q pam_gateway
+}
+
+_ensure_gateway() {
+    if ! _gateway_running; then
+        echo "  Gateway not running. Starting..."
+        bash "$BASEDIR/Pam/gateway.sh" start
+    fi
+}
+
+CMD="${1:-help}"
+shift 2>/dev/null || true
+
+case "$CMD" in
+
+# ---- Lifecycle ----
+
+BOOTSTRAP|bootstrap)
+    bash "$FDIR/BOOTSTRAP.sh" "$@"
+    ;;
+
+START|start)
+    if _gateway_running; then
+        _ok "Gateway already running."
+    else
+        bash "$FDIR/START.sh"
+    fi
+    ;;
+
+END|end|STOP|stop)
+    if _gateway_running; then
+        bash "$FDIR/END.sh"
+    else
+        _ok "Gateway not running. Nothing to stop."
+    fi
+    ;;
+
+RESET|reset)
+    bash "$FDIR/RESET.sh"
+    ;;
+
+MAINTAIN|maintain)
+    _ensure_gateway
+    bash "$FDIR/MAINTAIN.sh"
+    ;;
+
+# ---- Run a task ----
+
+RUN|run)
+    if [ $# -eq 0 ]; then
+        _fail "Usage: SciF RUN <task_name>"
+        echo "  Available tasks:"
+        ls "$TASKS_SRC" 2>/dev/null | sed 's/^/    /' || echo "    (none)"
+        exit 1
+    fi
+    _ensure_gateway
+    python3 "$BASEDIR/F/portal.py" driver "$@"
+    ;;
+
+# ---- Make task or skill ----
+
+MAKE|make)
+    if [ $# -eq 0 ]; then
+        _fail "Usage: SciF MAKE <description.md> [name]"
+        _hint "  SciF MAKE my_idea.md              → create task"
+        _hint "  SciF MAKE my_idea.md --skill name  → create skill"
+        exit 1
+    fi
+    _ensure_gateway
+    # Check if --skill flag is present
+    SKILL_MODE=false
+    SKILL_NAME=""
+    ARGS=()
+    for arg in "$@"; do
+        if [ "$arg" = "--skill" ]; then
+            SKILL_MODE=true
+        elif $SKILL_MODE && [ -z "$SKILL_NAME" ]; then
+            SKILL_NAME="$arg"
+        else
+            ARGS+=("$arg")
+        fi
+    done
+    if $SKILL_MODE; then
+        if [ -z "$SKILL_NAME" ]; then
+            _fail "Usage: SciF MAKE desc.md --skill <skill_name>"
+            exit 1
+        fi
+        bash "$BASEDIR/Nam/skill_maker.sh" "${ARGS[@]}" "$SKILL_NAME"
+    else
+        bash "$BASEDIR/Sam/task_maker.sh" "${ARGS[@]}"
+    fi
+    ;;
+
+# ---- Ask (multi-turn interactive agent) ----
+
+ASK|ask)
+    _ensure_gateway
+    python3 "$BASEDIR/F/portal.py" ask "$@"
+    ;;
+
+# ---- Evolution ----
+
+EVOLVE|evolve)
+    MODE="${1:-}"
+    if [ -z "$MODE" ]; then
+        _fail "Usage: SciF EVOLVE <suggest|model>"
+        exit 1
+    fi
+    if [ "$MODE" = "code" ]; then
+        _fail "EVOLVE code is disabled from SciF (too risky for automated use)."
+        _hint "If you understand the risk, run directly: bash F/evolution.sh code"
+        exit 1
+    fi
+    _ensure_gateway
+    shift
+    python3 "$BASEDIR/F/portal.py" evolution "$MODE" "$@"
+    ;;
+
+# ---- Status ----
+
+STATUS|status)
+    echo ""
+    echo "  --- Gateway ---"
+    if _gateway_running; then
+        _ok "Running on port $GATEWAY_PORT"
+    else
+        _fail "Not running. Use: SciF START"
+    fi
+    echo ""
+    echo "  --- Tasks ---"
+    echo "  Source:    $(ls "$TASKS_SRC" 2>/dev/null | wc -l) task(s) in Sam/tasks/"
+    echo "  Completed: $(ls "$FDIR/tasks" 2>/dev/null | wc -l) run(s) in F/tasks/"
+    echo ""
+    echo "  --- Skills ---"
+    echo "  Available: $(ls "$SKILLS_SRC" 2>/dev/null | wc -l) skill(s) in Nam/skills/"
+    echo ""
+    echo "  --- Containers ---"
+    for sif in "$BASEDIR/Kam/"*.sif; do
+        [ -f "$sif" ] && echo "  $(basename "$sif"): $(du -h "$sif" | cut -f1)"
+    done
+    echo ""
+    echo "  --- Compute ---"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        _gpu_line=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1 || true)
+        _ok "Local GPU: ${_gpu_line:-detected}"
+    else
+        echo "  Local GPU: none (host has no nvidia-smi — GPU: local will error)"
+    fi
+    if [ -n "${SLURM_JOB_ID:-}" ]; then
+        _ok "SLURM allocation: in job $SLURM_JOB_ID on ${SLURM_NODELIST:-?} (driver will run locally, no resubmit)"
+    else
+        if command -v sbatch >/dev/null 2>&1; then
+            _ok "sbatch available — GPU: slurm / on can submit"
+            _q=$(squeue -u "$USER" -h -t PD,R --format='%i %T %j' 2>/dev/null | grep -c '^drv_' || true)
+            [ "${_q:-0}" != "0" ] && echo "  Active driver SLURM jobs: $_q (squeue -u $USER)"
+        else
+            echo "  sbatch: not available — GPU: slurm / on will error"
+        fi
+    fi
+    echo ""
+    ;;
+
+# ---- SLURM Jobs ----
+
+JOBS|jobs)
+    SLURM_LOG_DIR="$FDIR/run/slurm"
+    if ! command -v squeue >/dev/null 2>&1; then
+        _fail "squeue not available on this host"
+        exit 1
+    fi
+    # Collect active driver jobs from squeue
+    _found=0
+    echo ""
+    echo "  --- Driver SLURM Jobs ---"
+    while IFS=' ' read -r _jid _state _name _elapsed _node; do
+        [ -z "$_jid" ] && continue
+        # Match log file by job name (drv_<task>)
+        _task="${_name#drv_}"
+        _log=$(ls -t "$SLURM_LOG_DIR/${_task}_"*.log 2>/dev/null | head -1)
+        printf "  %-8s %-10s %-30s %s  %s\n" "$_jid" "$_state" "$_name" "${_elapsed:+${_elapsed}}" "${_log:+→ ${_log}}"
+        _found=$((_found + 1))
+    done < <(squeue -u "$USER" -h -t PD,R,CG --format='%i %T %j %M %N' 2>/dev/null | grep '^[0-9].*drv_')
+    if [ "$_found" = "0" ]; then
+        echo "  (no active driver jobs)"
+    fi
+    # Show recent completed logs (last 5)
+    echo ""
+    echo "  --- Recent Logs ---"
+    _shown=0
+    for _log in $(ls -t "$SLURM_LOG_DIR/"*.log 2>/dev/null | head -5); do
+        _sz=$(du -h "$_log" 2>/dev/null | cut -f1)
+        _age=$(( ($(date +%s) - $(stat -c %Y "$_log" 2>/dev/null || echo 0)) / 60 ))
+        echo "  ${_age}m ago  ${_sz}  $(basename "$_log")"
+        _shown=$((_shown + 1))
+    done
+    [ "$_shown" = "0" ] && echo "  (no logs in $SLURM_LOG_DIR/)"
+    echo ""
+    ;;
+
+# ---- Help ----
+
+help|--help|-h|"")
+    echo ""
+    echo "  SciF — command center"
+    echo ""
+    echo "  First time:  SciF BOOTSTRAP"
+    echo "  Then:        SciF START → SciF RUN <task> → SciF END"
+    echo ""
+    echo "  Lifecycle:"
+    echo "    SciF BOOTSTRAP          Set up system (Pam → Kam → F)"
+    echo "    SciF START              Start the LLM gateway"
+    echo "    SciF END                Stop the LLM gateway"
+    echo "    SciF STATUS             Show system status"
+    echo "    SciF RESET              Clean runtime (keep tasks/skills/audit)"
+    echo "    SciF MAINTAIN           Run evolution + audit roll"
+    echo ""
+    echo "  Work:"
+    echo "    SciF RUN <task>              Run a task (auto-starts gateway)"
+    echo "    SciF MAKE <desc.md>          Create a task interactively"
+    echo "    SciF MAKE <desc.md> --skill <name>  Create a skill"
+    echo "    SciF ASK                     Multi-turn agent chat"
+    echo "    SciF EVOLVE <suggest|model>   Run evolution (code mode disabled)"
+    echo ""
+    echo "  GPU / SLURM (set in task top.md frontmatter, portal.py routes automatically):"
+    echo "    GPU: no | local | slurm | on    (default: no)"
+    echo "    Slurm: off | on                  (default: off)"
+    echo "    SciF RUN <task>  → local or sbatch depending on metadata"
+    echo "    SciF JOBS        → active driver SLURM jobs + recent logs"
+    echo "    SciF STATUS      → shows local GPU + sbatch availability"
+    echo ""
+    echo "  Help:"
+    echo "    SciFi <question>        One-shot guidance (LLM when gateway up)"
+    echo "    SciF help               This message"
+    echo ""
+    ;;
+
+*)
+    _fail "Unknown command: $CMD"
+    _hint "Run 'SciF help' for usage."
+    _hint "Or try: SciFi $CMD $*"
+    exit 1
+    ;;
+esac

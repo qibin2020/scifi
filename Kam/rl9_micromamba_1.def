@@ -1,0 +1,64 @@
+Bootstrap: localimage
+From: rl9_micromamba_0.sif
+
+%labels
+    Version 2.0
+    Description Level 1: + compilers, dev headers, doc/image utils, man pages, minimal LaTeX
+
+%post
+    # Enable man pages for this layer and all layers above
+    sed -i '/tsflags=nodocs/d' /etc/dnf/dnf.conf
+    dnf -y reinstall coreutils findutils grep sed gawk git curl
+
+    # EPEL (needed for ImageMagick, htop)
+    dnf -y install epel-release
+
+    # Build essentials
+    dnf -y install \
+        gcc \
+        gcc-c++ \
+        make \
+        openssl-devel \
+        zlib-devel \
+        bzip2-devel \
+        xz-devel \
+        libffi-devel \
+        sqlite-devel
+
+    # Display libs (pip install opencv-python links libGL.so at import time;
+    # not needed for matplotlib, PIL, or opencv-headless — conda bundles its own)
+    dnf -y install \
+        mesa-libGL \
+        mesa-libEGL
+
+    # Document / image utilities
+    dnf -y install \
+        poppler-utils \
+        graphviz \
+        ImageMagick
+
+    # System tools (htop needs EPEL)
+    dnf -y install \
+        htop
+
+    # Man / docs / DNS tools
+    dnf -y install \
+        man-db \
+        info \
+        bind-utils
+
+    # Minimal LaTeX (pdflatex + matplotlib PDF backend support)
+    dnf -y install \
+        texlive-scheme-basic \
+        texlive-amsmath \
+        texlive-graphics \
+        texlive-hyperref \
+        texlive-booktabs \
+        texlive-geometry \
+        texlive-xcolor \
+        texlive-type1cm \
+        texlive-cm-super \
+        texlive-dvipng \
+        texlive-ucs
+
+    dnf clean all

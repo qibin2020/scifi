@@ -1,0 +1,1 @@
+Make a task that creates a small directory tree of 5 deterministic files and writes a CSV manifest of path, size, and md5 for each.

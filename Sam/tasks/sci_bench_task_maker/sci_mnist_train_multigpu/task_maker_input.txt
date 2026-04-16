@@ -1,0 +1,1 @@
+Make a task that trains the same small AlexNet on MNIST but uses two local GPUs via DataParallel and proves both GPUs were exercised.

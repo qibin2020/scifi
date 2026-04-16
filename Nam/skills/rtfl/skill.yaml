@@ -1,0 +1,28 @@
+name: rtfl
+description: Read The F***ing Log — structured log parser. Extracts signal from large logs without dumping everything into context. ALWAYS start with mode=skeleton, then grep or slice to zoom in. Never cat an entire log.
+tool:
+  name: rtfl
+  description: Parse a log file and extract useful information. Start with skeleton mode (errors, warnings, exit codes, stack traces, head, tail). Then grep for patterns or slice for line ranges. Never read an entire log with read_file — use this tool instead.
+  parameters:
+    path:
+      type: string
+      required: true
+      description: Path to the log file (absolute or relative to task dir)
+    mode:
+      type: string
+      description: skeleton (default), grep (search pattern), slice (line range), head (first N lines), tail (last N lines)
+    pattern:
+      type: string
+      description: Regex pattern for grep mode
+    context_lines:
+      type: string
+      description: Context lines around grep matches (default 3)
+    start_line:
+      type: string
+      description: Start line for slice mode (1-indexed)
+    end_line:
+      type: string
+      description: End line for slice mode (1-indexed, inclusive)
+    lines:
+      type: string
+      description: Number of lines for head/tail mode (default 50)

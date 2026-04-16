@@ -1,0 +1,1 @@
+Generate a chained task that fetches a reference web page describing softmax, implements a numerically stable version in Python, writes tests, runs them, and links the source in notes.md.

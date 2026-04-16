@@ -1,0 +1,51 @@
+# Backup / archive / misc
+.misc/
+**/*.bak
+**/*.bak.*
+**/*.bak/
+**/*.bak.*/
+
+# Archives & compressed
+**/*.tar
+**/*.tar.gz
+**/*.tgz
+**/*.gz
+**/*.zip
+**/*.7z
+**/*.bz2
+**/*.xz
+
+# Containers & overlays
+**/*.sif
+**/*.img
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Logs & job output
+**/*.log
+**/*.out
+**/*.err
+
+# F runtime artifacts
+F/tasks/
+F/run/
+F/mnt/*
+F/home/*
+
+# Cam audit data (jsonl)
+Cam/**/*.jsonl
+
+# Editor / OS
+**/*.swp
+**/*.swo
+**/*~
+.DS_Store
+
+# ME
+F/home/.ssh/id*
+.secret.sh
+RD/
+ME.md

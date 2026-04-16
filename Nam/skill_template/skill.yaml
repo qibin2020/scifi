@@ -1,0 +1,13 @@
+name: skill_template
+description: Example tool skill — demonstrates the standard skill format.
+tool:
+  name: skill_template
+  description: Example tool that echoes input with metadata.
+  parameters:
+    message:
+      type: string
+      required: true
+      description: Message to echo
+    uppercase:
+      type: boolean
+      description: Convert to uppercase (default false)

@@ -1,0 +1,1 @@
+Write a task that verifies PyTorch can see and use the local CUDA GPU by running a small matmul and writing the version, device name, and timing to torch_gpu.txt.

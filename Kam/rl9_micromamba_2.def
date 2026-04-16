@@ -1,0 +1,9 @@
+Bootstrap: localimage
+From: rl9_micromamba_1.sif
+
+%labels
+    Version 2.0
+    Description Level 2: + code-server (browser IDE)
+
+%post
+    curl -fsSL https://code-server.dev/install.sh | sh

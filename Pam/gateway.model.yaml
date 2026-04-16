@@ -1,0 +1,172 @@
+model_list:
+  # ── claude-haiku group ──
+  # Bedrock pinned to us-east-2 (Anthropic use-case approved region).
+  # Anthropic-direct fallback disabled (rpm=0, budget exhausted).
+  - model_name: claude-haiku
+    litellm_params:
+      model: bedrock/converse/us.anthropic.claude-haiku-4-5-20251001-v1:0
+      api_key: os.environ/BEDROCK_API_KEY
+      aws_region_name: us-east-2
+    model_info:
+      priority: 0
+
+  - model_name: claude-haiku
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+      rpm: 0
+    model_info:
+      priority: 1
+
+  # ── claude-opus group ──
+  # Bedrock us-east-2. Anthropic-direct disabled (rpm=0).
+  - model_name: claude-opus
+    litellm_params:
+      model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
+      api_key: os.environ/BEDROCK_API_KEY
+      aws_region_name: us-east-2
+    model_info:
+      priority: 0
+
+  - model_name: claude-opus
+    litellm_params:
+      model: anthropic/claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+      rpm: 0
+    model_info:
+      priority: 1
+
+  # ── gemma4 (Ollama Cloud only) ──
+  - model_name: gemma4
+    litellm_params:
+      model: openai/gemma4:31b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+
+  # ── llama4-scout (Bedrock only) ──
+  - model_name: llama4-scout
+    litellm_params:
+      model: bedrock/converse/us.meta.llama4-scout-17b-instruct-v1:0
+      api_key: os.environ/BEDROCK_API_KEY
+
+  # ── deepseek-v3 (Bedrock only) ──
+  - model_name: deepseek-v3
+    litellm_params:
+      model: bedrock/converse/deepseek.v3.2
+      api_key: os.environ/BEDROCK_API_KEY
+
+  # ── gpt-oss group ──
+  # Bedrock active; Ollama Cloud disabled (rpm=0).
+  # 0% tool calls in RD bench — rank -1, fallback only.
+  - model_name: gpt-oss
+    litellm_params:
+      model: bedrock/converse/openai.gpt-oss-120b-1:0
+      api_key: os.environ/BEDROCK_API_KEY
+    model_info:
+      priority: 0
+  - model_name: gpt-oss
+    litellm_params:
+      model: openai/gpt-oss:120b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+      rpm: 0
+    model_info:
+      priority: 1
+
+  # ── deepseek-r1 (Bedrock only, reasoning-only) ──
+  - model_name: deepseek-r1
+    litellm_params:
+      model: bedrock/converse/us.deepseek.r1-v1:0
+      api_key: os.environ/BEDROCK_API_KEY
+
+
+  # ── fallback group (working horse) ──
+  # Priority cascade: Opus → deepseek-v3
+  - model_name: fallback
+    litellm_params:
+      model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
+      api_key: os.environ/BEDROCK_API_KEY
+    model_info:
+      priority: 0
+
+  - model_name: fallback
+    litellm_params:
+      model: anthropic/claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      priority: 1
+
+  - model_name: fallback
+    litellm_params:
+      model: bedrock/converse/deepseek.v3.2
+      api_key: os.environ/BEDROCK_API_KEY
+    model_info:
+      priority: 2
+
+  # ── fallback_high group (critical: review, pre-scan, ask) ──
+  # Opus → deepseek-v3.
+  - model_name: fallback_high
+    litellm_params:
+      model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
+      api_key: os.environ/BEDROCK_API_KEY
+    model_info:
+      priority: 0
+
+  - model_name: fallback_high
+    litellm_params:
+      model: anthropic/claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      priority: 1
+
+  - model_name: fallback_high
+    litellm_params:
+      model: bedrock/converse/deepseek.v3.2
+      api_key: os.environ/BEDROCK_API_KEY
+    model_info:
+      priority: 2
+
+  # ── scifi_model group (SciFi user interface) ──
+  # Load-balanced across all kept models for max availability.
+  - model_name: scifi_model
+    litellm_params:
+      model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
+      api_key: os.environ/BEDROCK_API_KEY
+
+  - model_name: scifi_model
+    litellm_params:
+      model: anthropic/claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: scifi_model
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: scifi_model
+    litellm_params:
+      model: bedrock/converse/deepseek.v3.2
+      api_key: os.environ/BEDROCK_API_KEY
+
+  - model_name: scifi_model
+    litellm_params:
+      model: bedrock/converse/us.deepseek.r1-v1:0
+      api_key: os.environ/BEDROCK_API_KEY
+
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  background_health_checks: true
+  health_check_interval: 300
+
+router_settings:
+  enable_pre_call_checks: true
+  retry_policy:
+    RateLimitError: 2
+    AuthenticationError: 0
+
+litellm_settings:
+  modify_params: true
+  num_retries: 1
+  cooldown_time: 300
+  allowed_fails: 1

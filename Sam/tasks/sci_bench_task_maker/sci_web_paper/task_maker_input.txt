@@ -1,0 +1,1 @@
+Generate a task where the agent fetches an arXiv abstract page over HTTP, parses out the title, first author, and the first sentence of the abstract, and writes them to paper.json.

@@ -1,0 +1,9 @@
+name: text_stats
+description: Text statistics — count words, lines, chars in a file. Read-only.
+tool:
+  name: text_stats
+  description: Get word/line/char counts for a file.
+  parameters:
+    path:
+      type: string
+      required: true

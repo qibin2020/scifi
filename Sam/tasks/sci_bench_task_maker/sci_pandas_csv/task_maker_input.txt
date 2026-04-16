@@ -1,0 +1,1 @@
+Generate a task where the agent reads a 1000-row CSV with category and value columns, computes per-category mean and std, and saves the summary CSV plus a bar chart.

@@ -1,0 +1,10 @@
+{
+  "source": "fallback",
+  "records": [
+    {"id": 1, "name": "alpha", "value": 150.0, "timestamp": "2025-01-15T08:00:00Z"},
+    {"id": 2, "name": "beta", "value": 230.5, "timestamp": "2025-02-20T12:30:00Z"},
+    {"id": 3, "name": "gamma", "value": 75.25, "timestamp": "2025-03-10T16:45:00Z"},
+    {"id": 4, "name": "delta", "value": 310.0, "timestamp": "2025-04-05T09:15:00Z"},
+    {"id": 5, "name": "epsilon", "value": 198.75, "timestamp": "2025-05-22T14:00:00Z"}
+  ]
+}

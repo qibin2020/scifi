@@ -1,0 +1,1 @@
+Generate a chained task where the agent trains a small CNN on MNIST, evaluates on the test set, saves a confusion matrix and metrics JSON, and writes a one-paragraph report.

@@ -1,0 +1,1 @@
+Using the common_env skill to discover or create a shared ROOT environment, perform a Gaussian fit: sample 10000 from N(2.5, 0.7), fill a ROOT TH1F histogram, fit with the built-in gaus function, and save fit parameters and plot.

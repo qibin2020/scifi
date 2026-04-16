@@ -1,0 +1,1 @@
+Generate a task that trains a small AlexNet-style CNN on MNIST for about 500 batches on a single local GPU, saves the model and a training log, and verifies last-100-batch accuracy above 90 percent.

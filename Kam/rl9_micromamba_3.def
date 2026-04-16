@@ -1,0 +1,79 @@
+Bootstrap: localimage
+From: rl9_micromamba_2.sif
+
+%labels
+    Version 2.0
+    Description Level 3: + X11 + TurboVNC + noVNC + Firefox + openbox + Okular + Texmaker + ksnip + Zathura + full LaTeX
+
+%post
+    # X11 libraries
+    dnf -y install \
+        xorg-x11-xauth \
+        xorg-x11-server-Xvfb \
+        libX11 \
+        libXext \
+        libXrender \
+        libXt \
+        libXi \
+        libXrandr \
+        libXcursor \
+        libXinerama \
+        libXcomposite \
+        libXdamage \
+        libXfixes \
+        libXtst \
+        dbus-x11 \
+        xterm \
+        xdg-utils
+
+    # Window manager + terminal
+    dnf -y install \
+        openbox \
+        xfce4-terminal
+
+    # Firefox
+    dnf -y install firefox
+
+    # TurboVNC
+    dnf -y install chkconfig initscripts policycoreutils-python-utils
+    wget -q https://github.com/TurboVNC/turbovnc/releases/download/3.3/turbovnc-3.3.x86_64.rpm -O /tmp/turbovnc.rpm
+    rpm -i /tmp/turbovnc.rpm
+    rm /tmp/turbovnc.rpm
+
+    # noVNC (HTML5 VNC client, served by TurboVNC via -novnc flag)
+    git clone --depth 1 https://github.com/novnc/noVNC.git /opt/noVNC
+    rm -rf /opt/noVNC/.git
+
+    # Full LaTeX (Rocky 9 has no scheme-full; install all available collections)
+    dnf -y install \
+        texlive-collection-basic \
+        texlive-collection-fontsrecommended \
+        texlive-collection-htmlxml \
+        texlive-collection-latex \
+        texlive-collection-latexrecommended \
+        texlive-collection-xetex
+
+    # Enable CRB repo (aspell lives there, needed by Okular → kf5-sonnet)
+    dnf -y install dnf-plugins-core
+    dnf config-manager --set-enabled crb
+
+    # Qt5 apps (Texmaker pulls Qt5; Okular + ksnip share the dep)
+    dnf -y install \
+        texmaker \
+        okular \
+        ksnip \
+        zathura \
+        zathura-pdf-poppler
+
+    dnf clean all
+
+%environment
+    export PATH="/opt/TurboVNC/bin:/usr/local/bin:$PATH"
+    export MAMBA_ROOT_PREFIX="/opt/micromamba"
+    export DISPLAY=:1
+
+%runscript
+    exec /bin/bash "$@"
+
+%startscript
+    /opt/TurboVNC/bin/vncserver :1 -geometry 1920x1080 -depth 24 -novnc /opt/noVNC

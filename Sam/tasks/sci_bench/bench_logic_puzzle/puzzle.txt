@@ -1,0 +1,22 @@
+There are 5 houses in a row, numbered 1 (far left) to 5 (far right).
+Each house has a unique color, is occupied by a person of a unique nationality,
+and each person keeps a unique pet.
+
+Colors:  Red, Blue, Green, Yellow, White
+Nations: Brit, Swede, Dane, German, Norwegian
+Pets:    Dog, Cat, Bird, Fish, Horse
+
+Constraints:
+1. The Brit lives in the red house.
+2. The Swede keeps a dog.
+3. The Norwegian lives in house 1.
+4. The green house is house 5.
+5. The blue house is immediately to the left of the red house.
+6. The person in house 2 keeps a horse.
+7. The Dane lives in house 2.
+8. The German keeps a bird.
+9. House 1 is yellow.
+10. The person in house 3 keeps fish.
+11. The German lives in house 4.
+
+# ANSWER: House1=Yellow,Norwegian,Cat; House2=Blue,Dane,Horse; House3=Red,Brit,Fish; House4=White,German,Bird; House5=Green,Swede,Dog

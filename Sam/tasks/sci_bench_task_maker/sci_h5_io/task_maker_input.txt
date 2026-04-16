@@ -1,0 +1,1 @@
+Create a task that writes a small numerical array and string labels to an HDF5 file, reads them back, and writes a verify.json summary.

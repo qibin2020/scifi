@@ -1,0 +1,1 @@
+Make a chained task that submits MNIST training to SLURM, waits for the checkpoint, then loads it locally and runs evaluation, saving the metrics and a workflow summary.

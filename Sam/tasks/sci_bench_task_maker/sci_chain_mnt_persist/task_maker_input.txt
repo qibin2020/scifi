@@ -1,0 +1,1 @@
+Generate a chained task where the agent reads a CSV from a shared /mnt seed, computes per-label means, and writes derived results into a per-run subdirectory of the shared workspace.

@@ -1,0 +1,1 @@
+Using the common_env skill, install CERN ROOT into a shared environment at /mnt/sci_envs/ (cold start). Verify ROOT imports and save the version to a file.

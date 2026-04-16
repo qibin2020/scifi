@@ -1,0 +1,12 @@
+name: json_tool
+description: JSON utilities — validate, pretty-print, query JSON files. Read-only.
+tool:
+  name: json_tool
+  description: Validate, pretty-print, or query a JSON file.
+  parameters:
+    path:
+      type: string
+      required: true
+    query:
+      type: string
+      description: Optional dot-path key to extract (e.g. data.name)

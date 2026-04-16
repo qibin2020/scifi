@@ -1,0 +1,1 @@
+Make a task where the agent uses CERN ROOT in a Python env to sample a Gaussian, fill a histogram, fit with the built-in gaus function, and save the fit parameters and plot.

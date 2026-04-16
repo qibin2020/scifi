@@ -1,0 +1,71 @@
+Bootstrap: docker
+From: rockylinux:9
+
+%labels
+    Author binus
+    Version 2.0
+    Description Level 0: Rocky Linux 9 + micromamba + SSH + system essentials
+
+%post
+    # Swap curl-minimal for full curl
+    dnf -y swap curl-minimal curl --allowerasing
+    dnf -y update --exclude=filesystem
+
+    # CLI tools
+    dnf -y install \
+        nano \
+        vim \
+        wget \
+        curl \
+        git \
+        git-lfs \
+        tar \
+        gzip \
+        bzip2 \
+        unzip \
+        which \
+        findutils \
+        grep \
+        sed \
+        gawk \
+        less \
+        bc \
+        file \
+        tree \
+        rsync \
+        zip \
+        xz \
+        patch \
+        diffutils \
+        jq \
+        tmux
+
+    # SSH
+    dnf -y install \
+        openssh-clients \
+        openssh-server
+
+    # System monitoring + network (top is in procps-ng)
+    dnf -y install \
+        procps-ng \
+        ca-certificates \
+        net-tools \
+        iputils \
+        hostname
+
+    dnf clean all
+
+    # Initialize git-lfs
+    git lfs install --system
+
+    # Micromamba
+    curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C /usr/local bin/micromamba
+    mkdir -p /opt/micromamba
+    /usr/local/bin/micromamba shell init -s bash -r /opt/micromamba
+
+%environment
+    export PATH="/usr/local/bin:$PATH"
+    export MAMBA_ROOT_PREFIX="/opt/micromamba"
+
+%runscript
+    exec /bin/bash "$@"

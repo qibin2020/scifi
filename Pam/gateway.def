@@ -1,0 +1,6 @@
+Bootstrap: localimage
+From: gateway.precursor.sif
+
+%startscript
+    cd /app
+    exec docker/prod_entrypoint.sh "$@"

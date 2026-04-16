@@ -1,0 +1,5 @@
+The agent benchmark suite tests common scientific operations.
+Each task isolates one capability so a regression is easy to localize.
+Plot a sine wave. Train a tiny MNIST classifier. Fit a Gaussian.
+Submit a hello-world job to SLURM. Read a shared file from /mnt.
+These are the everyday building blocks of computational research.

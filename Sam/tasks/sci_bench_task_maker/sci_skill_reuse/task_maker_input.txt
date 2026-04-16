@@ -1,0 +1,1 @@
+Using the common_env skill, discover and reuse an existing shared ROOT environment at /mnt/sci_envs/ (warm start). Perform a Gaussian fit and save parameters and plot.

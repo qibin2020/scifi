@@ -1,0 +1,1 @@
+Generate a task where the agent installs CERN ROOT from conda-forge into a local micromamba env and writes the version to root_version.txt.

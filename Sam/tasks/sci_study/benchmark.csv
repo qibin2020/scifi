@@ -1,0 +1,13 @@
+task,variant,old_name,old_pass_rate,old_runs_to_first_pass,old_cum_iters,old_wall_min,old_wall_max,new_pass_rate,new_runs_to_first_pass,new_cum_iters,new_wall_min,new_wall_max,notes
+fw_bootstrap,NL,(new),,,,,,1/1,1,7,65,65,"cold start toolchain install, reuses existing calovq env"
+fw_complete1,NL,real_FW_complete_simple_gg,1/1,1,33,532,532,1/1,1,81,932,932,skeleton fill-in
+fw_complete1_detailed,EX,real_FW_complete_gg,1/1,1,26,1422,1422,1/1,1,44,1801,1801,skeleton fill-in with subtasks
+fw_complete2,NL,real_FW_empty_simple_gg,1/1,1,22,348,348,1/1,1,34,442,442,empty stub from scratch
+fw_complete2_detailed,ST,real_FW_empty_refined_gg,1/1,1,50,1131,1131,1/1,1,111,1673,1673,empty stub detailed
+fw_complete3,NL,real_FW_void_simple_v2_gg,5/6,2,369,230,759,8/8,1,43,319,1264,"void both halves NL; earlier 7/10 was false — 3 KILLED by test timeout (1800s < driver 3600s limit)"
+fw_complete3_detailed,EX,real_FW_void_gg,1/1,1,88,898,898,1/1,1,39,1182,1182,void both halves EX
+fw_complete3_tiny,RH,real_FW_void_tiny_gg,1/13,13,1745,,,1/7,7,,,,void both halves RH (TaskGroup memory)
+fw_debug,NL,FW_task1_debug_nohint,1/1,1,59,,,1/1,1,56,1496,1496,single-file debug no hints
+calo-vq_rep,NL,sci_calo_vq_pipeline_v3_NL,,,,,,,1/1,1,25,352,352,"GPU: local (was slurm), CaloVQ pipeline"
+calo-vq_rep_refined,ST,sci_calo_vq_pipeline_v3_ST,,,,,,,1/1,1,23,357,357,CaloVQ pipeline structured
+lhco_CWoLa_VAE_detailed,EX,lhco_guided_v2,1/1,1,55,,,1/1,1,95,1800,1800,CWoLa+VAE anomaly detection

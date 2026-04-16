@@ -1,0 +1,1 @@
+Make a task where the agent uses the NERSC slurm maker skill to submit a 1-GPU job that trains a small MNIST classifier and produces a model checkpoint.
