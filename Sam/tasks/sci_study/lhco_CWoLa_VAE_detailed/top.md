@@ -47,13 +47,19 @@ Target: AUC > 0.78.
 
 ## Todo
 
-1. Write one Python script that trains CWoLa + VAE + hybrid, evaluates, saves models and plots
-2. Run it with timeout 1500
-3. Save models to /mnt/lhco/guided_v2/models/ (cwola_model.pkl, vae_model.pt, scaler.npz)
-4. Save results to /mnt/lhco/guided_v2/results/ (metrics.json, roc_curve.png, score_dist.png)
+1. **Fetch data if absent.** If `/mnt/lhco/data/features/features.npy` and `/mnt/lhco/data/features/labels.npy` are not already present, download them into `/mnt/lhco/data/features/`. Acceptable sources:
+   - HuggingFace Datasets (e.g. `huggingface_hub.snapshot_download(repo_id="JustWhit3/LHCO2020", repo_type="dataset")`) and convert to the required `features.npy` + `labels.npy` shapes described above.
+   - Or any equivalent mirror you know of that provides the LHCO 2020 R&D dataset.
+   - If no internet access is available, fail gracefully and print a clear "data unavailable" message rather than fabricating data.
+2. Write one Python script that trains CWoLa + VAE + hybrid, evaluates, saves models and plots
+3. Run it with timeout 1500
+4. Save models to /mnt/lhco/guided_v2/models/ (cwola_model.pkl, vae_model.pt, scaler.npz)
+5. Save results to /mnt/lhco/guided_v2/results/ (metrics.json, roc_curve.png, score_dist.png)
 
 ## Expect
 
+- /mnt/lhco/data/features/features.npy exists after the task runs
+- /mnt/lhco/data/features/labels.npy exists after the task runs
 - /mnt/lhco/guided_v2/models/cwola_model.pkl exists, > 100 KB
 - /mnt/lhco/guided_v2/models/vae_model.pt exists, > 5 KB
 - /mnt/lhco/guided_v2/results/metrics.json exists with 'auc' > 0.78
