@@ -1,0 +1,5 @@
+# shared seed for sci_mnt_share_read benchmark
+seed_id=bench_seed_v1
+alpha=42
+beta=hello
+gamma=3.14159
