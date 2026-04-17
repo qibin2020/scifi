@@ -494,7 +494,8 @@ def run_scif(task: Task, attempt: int, timeout_s: int) -> RunResult:
 # Classification + retry
 # ============================================================================
 
-def classify(res: RunResult, bench: Optional[BenchRow], slow_wall_mult: float,
+def classify(res: RunResult, bench: Optional[BenchRow],
+             slow_iter_mult: float, slow_wall_mult: float,
              attempts_left: int, retry_on_slow: bool) -> str:
     if res.status == "FAIL":
         return "retry" if attempts_left > 0 else "fail_persistent"
@@ -504,7 +505,7 @@ def classify(res: RunResult, bench: Optional[BenchRow], slow_wall_mult: float,
         return "accepted"
 
     iter_bad = (bench.iter_max is not None and res.iters is not None
-                and res.iters > bench.iter_max)
+                and res.iters > bench.iter_max * slow_iter_mult)
     wall_bad = (bench.wall_max is not None and res.wall_s is not None
                 and res.wall_s > bench.wall_max * slow_wall_mult)
 
@@ -606,7 +607,8 @@ class Runner:
         self.args = args
         self.parallel = args.parallel
         self.max_retry = args.retry
-        self.slow_mult = args.slow_wall_mult
+        self.slow_iter_mult = args.slow_iter_mult
+        self.slow_wall_mult = args.slow_wall_mult
         self.retry_on_slow = not args.no_retry_on_slow
         self.resume = args.resume
         self.monitor = Monitor()
@@ -657,7 +659,8 @@ class Runner:
                 res.run_dir = _find_latest_run_dir(task)
 
             attempts_left = self.max_retry - attempt
-            verdict = classify(res, bench, self.slow_mult, attempts_left, self.retry_on_slow)
+            verdict = classify(res, bench, self.slow_iter_mult, self.slow_wall_mult,
+                               attempts_left, self.retry_on_slow)
             caps_str = ",".join(f"{k}={v}" for k, v in res.caps.items() if v) or ""
             csv_append(dict(
                 group=task.group, task=task.name, attempt=attempt, status=res.status,
@@ -874,7 +877,10 @@ def main():
     run.add_argument("--retry", type=int, default=3)
     run.add_argument("--resume", action="store_true")
     run.add_argument("--no-retry-on-slow", action="store_true")
-    run.add_argument("--slow-wall-mult", type=float, default=3.0)
+    run.add_argument("--slow-iter-mult", type=float, default=1.5,
+                     help="retry on slow if iters > iter_max * this (default 1.5)")
+    run.add_argument("--slow-wall-mult", type=float, default=3.0,
+                     help="retry on slow if wall > wall_max * this (default 3.0)")
 
     plan = sub.add_parser("plan", help="print the schedule without running")
     plan.add_argument("--groups", default=",".join(GROUPS))
