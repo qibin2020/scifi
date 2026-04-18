@@ -94,7 +94,7 @@ SciF EVOLVE <suggest|model>          # run evolution (code mode disabled)
 ### Prerequisites
 
 1. **Apptainer** — container runtime. Path set in `ENV.sh` as `APPTAINER=`.
-   Check: `apptainer --version`. On NERSC: `/cvmfs/atlas.cern.ch/.../apptainer`
+   Check: `apptainer --version`. On NERSC: see APPTAINER path in ENV.sh
 2. **API keys** — at least one provider key set in `.secret.sh` (sourced by `ENV.sh`)
 
 ### Dependency chain
