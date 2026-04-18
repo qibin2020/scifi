@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Check required env
-for var in BASEDIR APPTAINER; do
+for var in BASEDIR APPTAINER GATEWAY_IMAGE GATEWAY_TAG; do
     if [ -z "${!var:-}" ]; then
         echo "ERROR: $var is not set. Source ENV.sh first." >&2
         exit 1
@@ -86,23 +86,14 @@ print('connection_max: 10')
     echo ""
 fi
 
-# Find the latest -stable tag from Docker Hub
-TAG=$(curl -s "https://hub.docker.com/v2/repositories/litellm/litellm/tags?page_size=100&ordering=last_updated" \
-    | python3 -c "
-import sys, json
-tags = json.load(sys.stdin)['results']
-stable = [t['name'] for t in tags if '-stable' in t['name']]
-print(stable[0])
-")
-
-echo "=== Pulling litellm:${TAG} ==="
+echo "=== Pulling ${GATEWAY_IMAGE}:${GATEWAY_TAG} ==="
 PRECURSOR="$PAM/gateway.precursor.sif"
 FINAL="$PAM/gateway.sif"
 
 if [ -f "$PRECURSOR" ]; then
     echo "precursor exists, skipping pull."
 else
-    $APPTAINER pull "$PRECURSOR" "docker://litellm/litellm:${TAG}"
+    $APPTAINER pull "$PRECURSOR" "docker://${GATEWAY_IMAGE}:${GATEWAY_TAG}"
     if [ ! -f "$PRECURSOR" ]; then
         echo "ERROR: precursor SIF not created. Pull failed." >&2
         exit 1

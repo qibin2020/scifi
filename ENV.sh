@@ -23,6 +23,9 @@ chmod 600 ${BASEDIR}/.secret.sh
 . ${BASEDIR}/.secret.sh
 export GATEWAY_PORT=$(( ($(id -u) % 55535) + 10000 ))
 # export LITELLM_MASTER_KEY=   # leave unset → litellm runs without master key auth
+## Pinned LiteLLM image (ghcr.io upstream). Bump deliberately; do NOT auto-follow latest.
+export GATEWAY_IMAGE=ghcr.io/berriai/litellm
+export GATEWAY_TAG=v1.83.3-stable
 
 ## Fallback model groups (hardcoded model names in the system)
 ## FALLBACK_HIGHEST/FALLBACK_WORKING: used when ranking system (gateway.rank.yaml) is unavailable
