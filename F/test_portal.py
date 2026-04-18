@@ -240,10 +240,13 @@ class TestResolveSlurm(unittest.TestCase):
 
     def test_on(self):
         binds = portal.resolve_slurm({"Slurm": "on"})
-        paths = [b[0] for b in binds]
-        self.assertIn("/usr/bin/sbatch", paths)
-        self.assertIn("/usr/bin/squeue", paths)
-        self.assertIn("/usr/bin/scancel", paths)
+        dest_paths = [b[1] for b in binds]
+        self.assertIn("/usr/bin/sbatch", dest_paths)
+        self.assertIn("/usr/bin/squeue", dest_paths)
+        self.assertIn("/usr/bin/scancel", dest_paths)
+        src_paths = [b[0] for b in binds if b[1] == "/usr/bin/sbatch"]
+        self.assertTrue(len(src_paths) == 1)
+        self.assertTrue(os.path.isfile(src_paths[0]))
 
     def test_gpu_slurm_implies_on(self):
         binds = portal.resolve_slurm({"GPU": "slurm"})

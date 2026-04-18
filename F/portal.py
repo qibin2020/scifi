@@ -235,9 +235,22 @@ def resolve_slurm(meta):
     if slurm == "on":
         binds = []
         for cmd in ("sbatch", "squeue", "scancel", "srun", "sacct", "scontrol"):
-            binds.append(("/usr/bin/%s" % cmd, "/usr/bin/%s" % cmd, "ro"))
-        binds.append(("/usr/lib64/slurm", "/usr/lib64/slurm", "ro"))
-        print("[slurm] sbatch mapped into container", file=sys.stderr)
+            real = shutil.which(cmd)
+            if real:
+                binds.append((real, "/usr/bin/%s" % cmd, "ro"))
+        if not binds:
+            print("[slurm] WARNING: no SLURM binaries found in PATH", file=sys.stderr)
+            return []
+        slurm_lib = None
+        sample = shutil.which("sbatch")
+        if sample:
+            bin_dir = os.path.dirname(os.path.realpath(sample))
+            candidate = os.path.join(os.path.dirname(bin_dir), "lib64", "slurm")
+            if os.path.isdir(candidate):
+                slurm_lib = candidate
+        if slurm_lib:
+            binds.append((slurm_lib, "/usr/lib64/slurm", "ro"))
+        print("[slurm] sbatch mapped into container (%s)" % os.path.dirname(os.path.realpath(shutil.which("sbatch"))), file=sys.stderr)
         return binds
 
     print("[slurm] sbatch NOT mapped (Slurm: off)", file=sys.stderr)
