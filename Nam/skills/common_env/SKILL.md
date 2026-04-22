@@ -32,11 +32,24 @@ MAMBA_ROOT_PREFIX=/mnt/sci_envs/<prefix> micromamba env list 2>/dev/null
 
 ## Step 2: Check if an existing env meets your needs
 
-**Consider env names.** Each prefix describes a domain (e.g. `root` for ROOT,
-`fpga_toolchain` for Verilator/g++, `ml` for PyTorch). Prefer an env whose name
-matches your task's domain. If no name matches, check packages before reusing.
+**First, read each prefix's `PURPOSE.md` if present.** This file is written
+by this skill at env-creation time and describes the env's intended domain
+and key packages. Prefer matches based on purpose over matches based on
+directory-name guesses:
 
-If you find a prefix that looks relevant, verify it has the packages you need:
+```bash
+for d in /mnt/sci_envs/*/; do
+    [ -f "$d/PURPOSE.md" ] && echo "=== $d ===" && cat "$d/PURPOSE.md"
+done
+```
+
+**Then consider env names** (useful as a fallback when `PURPOSE.md` is
+missing — older envs predate this convention). Each prefix describes a
+domain (e.g. `root` for ROOT, `fpga_toolchain` for Verilator/g++, `ml`
+for PyTorch).
+
+If a prefix's purpose or name matches your task, verify it actually has
+the packages you need:
 ```bash
 MAMBA_ROOT_PREFIX=/mnt/sci_envs/<prefix> micromamba run -n <env> python -c "import <package>; print('OK')"
 ```
@@ -69,6 +82,28 @@ Verify after install:
 ```bash
 MAMBA_ROOT_PREFIX=/mnt/sci_envs/<prefix> micromamba run -n <env> python -c "import <package>; print('OK')"
 ```
+
+Once verification passes, **write a `PURPOSE.md` descriptor** at
+`/mnt/sci_envs/<prefix>/PURPOSE.md` so future tasks can discover and reuse
+this env instead of creating a near-duplicate. Keep it plain and short:
+
+```bash
+cat > /mnt/sci_envs/<prefix>/PURPOSE.md << 'EOF'
+# <one-line purpose, e.g. "Verilator + g++ FPGA simulation toolchain">
+
+## Packages
+- <key package 1>
+- <key package 2>
+- ...
+
+## Created by
+task: <group/task_name>
+date: <YYYY-MM-DD>
+EOF
+```
+
+Do NOT list every transitive dependency — only the packages a caller would
+search for. The point is matchability, not a manifest.
 
 **If read-only** — fall back to a local env in the task directory:
 ```bash
