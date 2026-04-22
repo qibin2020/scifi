@@ -35,12 +35,18 @@ MAMBA_ROOT_PREFIX=./mamba_env micromamba create -y -n work -c conda-forge <packa
 After creating the environment, write `env.sh` so all bash commands
 automatically use it:
 
+Use absolute paths anchored to `env.sh` itself — relative paths break as
+soon as the agent does `cd subdir && python script.py` and the script
+internally calls `subprocess.run(['make'])` (PATH would resolve against
+the new cwd and miss the env).
+
 ```bash
 cat > env.sh << 'EOF'
-export MAMBA_ROOT_PREFIX=./mamba_env
-export CONDA_PREFIX=./mamba_env/envs/work
-export PATH="./mamba_env/envs/work/bin:$PATH"
-export LD_LIBRARY_PATH="./mamba_env/envs/work/lib:${LD_LIBRARY_PATH:-}"
+_ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export MAMBA_ROOT_PREFIX="$_ENV_ROOT/mamba_env"
+export CONDA_PREFIX="$_ENV_ROOT/mamba_env/envs/work"
+export PATH="$_ENV_ROOT/mamba_env/envs/work/bin:$PATH"
+export LD_LIBRARY_PATH="$_ENV_ROOT/mamba_env/envs/work/lib:${LD_LIBRARY_PATH:-}"
 EOF
 ```
 

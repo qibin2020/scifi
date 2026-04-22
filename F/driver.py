@@ -45,7 +45,7 @@ GATEWAY = os.environ.get("GATEWAY_URL", "http://localhost:4000")
 FALLBACK_HIGHEST = os.environ["FALLBACK_HIGHEST"]
 FALLBACK_WORKING = os.environ["FALLBACK_WORKING"]
 MAX_ITER = int(os.environ.get("MAX_ITERATIONS", "50"))  # absolute cap (overridden per-rank)
-MAX_REVIEW_ITER = int(os.environ.get("MAX_REVIEW_ITER", "20"))
+MAX_REVIEW_ITER = int(os.environ.get("MAX_REVIEW_ITER", "100"))
 MAX_REFLECT_ITER = int(os.environ.get("MAX_REFLECT_ITER", "15"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
 CHECKPOINT_EVERY = int(os.environ.get("CHECKPOINT_EVERY", "5"))
@@ -623,13 +623,17 @@ Environment:
     micromamba run -r ./mamba_env -n work pip install <pkg>
 - env.sh is the standard way to persist environment setup across bash calls.
   If env.sh exists in ./, it is auto-sourced before every bash command.
-  After finding or creating an environment, IMMEDIATELY write env.sh:
+  After finding or creating an environment, IMMEDIATELY write env.sh.
+  Use absolute paths anchored to env.sh itself — relative ./ paths break
+  as soon as a command does `cd subdir && ...` or a script internally
+  calls subprocess.run:
     cat > env.sh << 'EOF'
-    export PATH="./mamba_env/envs/work/bin:$PATH"
-    export LD_LIBRARY_PATH="./mamba_env/envs/work/lib:${LD_LIBRARY_PATH:-}"
+    _ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    export PATH="$_ENV_ROOT/mamba_env/envs/work/bin:$PATH"
+    export LD_LIBRARY_PATH="$_ENV_ROOT/mamba_env/envs/work/lib:${LD_LIBRARY_PATH:-}"
     EOF
-  Then all subsequent bash commands will have the tools available as bare
-  commands (python3, g++, make, verilator, etc.) — no prefixes needed.
+  Then all subsequent bash commands will have the env's tools available as
+  bare commands — no prefixes needed.
 - /tmp is writable but not persistent across runs.
 - Writes to paths outside ./ may silently vanish. Always use ./
 
@@ -638,6 +642,29 @@ Memory and global experience in your context may be truncated — use
 memory_read or read_file tools to access full versions when needed.
 An independent reviewer will check your Expect claims after you call done.
 Call done only when you believe all expectations are truly met.
+
+When you call done, include two things in the summary:
+
+1) RAW evidence — the actual command(s) you ran plus the tail of their
+   output (~10-30 lines, uninterpreted). Paste the command line prefixed
+   with `$ ` then the tool's literal stdout/stderr tail. Do NOT fabricate
+   or paraphrase — the reviewer grep-checks the cited output AND re-runs
+   independently. Honest partial-success beats polished prose; if a step
+   failed, quote the real failure line.
+
+2) A `## Verification Reference` block at the END of your summary — a
+   warmup map for the reviewer so they don't have to rediscover your env.
+   Format:
+     ## Verification Reference
+     - Env: <skill used (common_env/local_env/temp_env) + where env.sh lives>
+     - Verify: <exact bash command(s) that passed, copy-pasteable>
+     - Evidence: <file path or stdout signature that shows pass>
+     - Randomness: <seed(s) / fixture / sampling if any — reviewer may vary>
+
+   This is a SOFT HINT. The reviewer treats it as a warmup, not as
+   authority — they will re-run verification independently and may vary
+   random inputs/seeds to detect fabrication. An accurate reference
+   speeds review; a misleading one just invites stricter scrutiny.
 
 Bash output may be truncated for long commands. To get specific results from
 long output, use grep, tail, or redirect to a file and read the parts you need.
@@ -724,32 +751,57 @@ CASE 1 — Worker called `done`  (your primary duty: independent verification)
      command, or ANY command that PRODUCES the expected evidence, YOU MUST
      RE-RUN that command yourself and compare its ACTUAL output against the
      criterion. Examples:
-       - "nopause.log contains PASSED: All" → re-run the verify script that
-         should produce nopause.log; check its live output, not the file.
-       - "pytest passes" → run pytest yourself.
+       - "<log-file> contains <success-string>" → re-run the command that
+         should produce the log; check its LIVE output, not the file.
+       - "tests pass" → run the test runner yourself.
        - "binary X exists and prints Y" → run the binary yourself.
      The file on disk is NOT evidence. The live command output IS evidence.
   4. Cross-check for fabrication signals:
        - Does the log's format / header / structure actually match what the
-         tool produces? (A one-line "PASSED: All" with no real test counts,
-         timings, or context = fabricated.)
+         tool produces? A suspiciously terse success line (e.g. a lone
+         "PASSED" or "OK" with no test counts, timings, summary, or framing
+         the real tool would emit) is a fabrication red flag.
        - Compare file mtime to the history of bash calls. If the log was
          written by `write_file` rather than by running the verifier, it is
          fabricated.
        - If you re-run the verification and the output differs from the file,
          the file is stale or fake — REJECT.
-  5. Efficiency: you run in the same task_dir with the same environment, so
-     you can reuse whatever the worker already built or installed. Redo the
-     verification step only, not the setup.
-  6. ENVIRONMENT AWARENESS: the worker often installs packages into a LOCAL
-     environment (./env, ./mamba_env, etc.) rather than the system Python.
-     Before concluding "module not found = fabrication":
-       - Check if env.sh exists and source it: `. ./env.sh && python3 -c "..."`
-       - Check for local micromamba envs: `ls ./env/envs/ ./mamba_env/envs/ 2>/dev/null`
-       - Run commands through the worker's env: `MAMBA_ROOT_PREFIX=./env micromamba run -n work python3 -c "..."`
-       - If the worker's bash history shows `micromamba run -n <name>`, use the same prefix.
-     "Module not found" in system python is NOT evidence of fabrication when
-     the worker used a local env. Verify IN the worker's env.
+  5. WARMUP — read worker's "## Verification Reference" block.
+     The worker's done summary may include a `## Verification Reference`
+     block naming the env, verification commands, evidence locations, and
+     random seeds used. Treat this as a WARMUP MAP, not as authority:
+       - Use it to jump straight to the verify step (skip env rediscovery).
+       - Then independently run at least one cited command yourself AND
+         cross-check the artifacts; trust only what YOU observe.
+       - If no Verification Reference is present, scan the worker's recent
+         bash tool_results (exit code 0) for the same cues.
+
+  6. ENV-REUSE POLICY — do NOT rebuild the environment.
+     When the worker claims done, the env is in a good state by definition.
+     Your bash is auto-wrapped with `. env.sh && ...` so tools are on PATH.
+       - common_env (shared /mnt/sci_envs/<prefix>): READ-ONLY. Never
+         rebuild, never pip/mamba install anything there. Just source
+         env.sh (automatic) and run bare commands.
+       - local_env (./mamba_env) or temp_env (/tmp/mamba_env): REUSE what
+         the worker built. Do not recreate. env.sh is auto-sourced.
+       - If env.sh is missing or malformed, surface that as a failure —
+         don't invent a new env.
+     "Module not found" in system python when the worker used a local env
+     is NOT fabrication — it means you bypassed env.sh. Try again with
+     the env. `bash` in this agent auto-sources env.sh; just don't write
+     commands that `cd` elsewhere and shadow the wrapper.
+
+  7. RANDOMIZATION — vary inputs to catch over-fitting/fabrication.
+     If the verification uses a random seed, a fixed sample, or a specific
+     test fixture, VARY it when you re-run:
+       - Re-run with a different seed.
+       - Feed a different sample / edge case / alternate fixture.
+       - Perturb inputs in a way the worker couldn't have anticipated.
+     A correct solution generalizes across varied inputs; a solution that
+     was pattern-matched to the reference case will diverge. If the task
+     is deterministic with no randomness, cross-check artifacts against
+     domain invariants instead (expected value ranges, file structure,
+     counts, known-good relationships between fields).
 
   Call `verdict`:
     - passed=true  ONLY if YOUR OWN observations independently confirm EVERY
@@ -760,10 +812,39 @@ CASE 1 — Worker called `done`  (your primary duty: independent verification)
       worker's claim. In `reason`, state specifically what the worker should
       fix, including the concrete evidence of the failure.
 
-  When rejecting, BE SPECIFIC. "Tests didn't pass" is useless. "Re-ran
-  `python3 verify_golden.py --no-pause`: exited with build error at
-  stream_wrapper.v:78 'unexpected comma, expecting }'" is useful — the next
-  attempt can act on it.
+  When rejecting, BE SPECIFIC AND DIAGNOSTIC. Restating the failure ("most
+  tests fail", "mismatch") is useless — the next worker will just rewrite and
+  hit the same class of bug. Look AT the failure output and try to name the
+  pattern. Common categories (task-agnostic):
+
+    - SYSTEMATIC DEVIATION: observed values differ from expected by a
+      near-constant amount, ratio, or scale across all items.
+      (suggests a wrong factor / normalization / direction / precision in
+       one computation, not per-item bugs)
+    - POSITIONAL error: some items wrong, others correct, with structure.
+      (e.g. every other item wrong → stride/step off-by-one;
+       first N wrong then correct → warmup / pipeline not flushed;
+       last N missing → early termination / wrong loop bound)
+    - INDEX/TIME SHIFT: observed sequence i matches expected i+k.
+      (output lags or leads by k — wrong trigger condition, off-by-k
+       in an index, wrong causality)
+    - BUILD / RUNTIME error: compile fails, exit nonzero, import error,
+      missing file. Quote the exact line the tool emitted.
+    - GARBAGE output: no discernible relationship to expected.
+      (suggests fundamental wrong-algorithm / wrong-wiring, not a subtle
+       tweak; next attempt should re-read the spec before rewriting)
+
+  In `reason` / `memory_update`, NAME the pattern you see and suggest the
+  CLASS of fix, not just what's wrong. Example shape (adapt to your task):
+  "observed values are uniformly ~30% below expected — looks like a
+  constant-factor bug in the producing step; check the scaling/direction in
+  <component>." Quote 2-3 concrete values (first two + a later one) so the
+  next worker can sanity-check their own fix.
+
+  If you cannot diagnose from the output alone, say so explicitly — e.g.
+  "outputs look unrelated to inputs; could not identify a pattern;
+  recommend re-reading the interface spec / reference data before
+  rewriting."
 
 CASE 2 — Worker hit MAX_ITERATIONS  (forward-looking guidance)
 
@@ -788,9 +869,14 @@ CASE 2 — Worker hit MAX_ITERATIONS  (forward-looking guidance)
   files the worker modified. The next worker starts fresh with no memory.
   Use this format:
     KEEP: <what is correct in the current files — be specific, name values>
-    FIX:  <what is still wrong and how>
+    FIX:  <what is still wrong and how — name the PATTERN when possible>
     RUN:  <exact command to verify>
   Without KEEP, the next worker will rewrite from scratch and lose progress.
+
+  Pattern-naming applies here too (see CASE 1 "BE SPECIFIC AND DIAGNOSTIC"):
+  if the last verify showed a systematic offset, time-shift, or every-Nth
+  error, NAME that pattern in FIX so the next worker doesn't repeat the
+  same guess. Quote 2-3 concrete sample values if available.
 
   Model control (pick ONE):
     - Same model, just retry with better guidance: omit model fields.
@@ -818,10 +904,21 @@ You are a quick verification agent. Check if the task's Expect criteria are met.
 Read the task file for the Expect section. Use bash/read_file to INDEPENDENTLY
 verify each criterion — observe real state with your own tools. Do not trust
 worker-produced log files or claims; if a criterion references a test/verify
-script, re-run it yourself and use the live output. Then call `verdict` with
-passed=true/false, observations (quoting the real output you saw), and reason.
-If case is 'failed', call `decision` with action=retry + concrete memory_update
-hints for the next attempt (name files, commands, pitfalls)."""
+script, re-run it yourself and use the live output.
+
+Env reuse: bash auto-sources env.sh, so the worker's env is active. Do NOT
+rebuild it. If worker included a `## Verification Reference` block in the
+done summary, use it as a warmup (env path, verify command), then verify
+independently. When inputs are random, vary the seed to catch over-fitting.
+
+Then call `verdict` with passed=true/false, observations (quoting the real
+output you saw), and reason. When rejecting, look for a PATTERN in the
+failure — is the deviation SYSTEMATIC (constant factor/offset across items),
+POSITIONAL (every-Nth item, first-N, or last-N), SHIFTED (observed i matches
+expected i+k), a BUILD/RUNTIME error, or GARBAGE (no pattern) — and name it
+in `reason`. Quote 2-3 sample values. If case is 'failed', call `decision`
+with action=retry + concrete memory_update hints (name files, commands,
+pitfalls, patterns)."""
 
 REFLECT_SYSTEM = """\
 You are a reflection agent. A SAM failed to converge. Diagnose WHY.
@@ -1318,9 +1415,15 @@ def _compact_text(text, instruction=""):
 
 
 def _prepare_bash(command, task_dir):
-    """Wrap command with env.sh sourcing if the file exists in task_dir."""
-    if os.path.isfile(os.path.join(task_dir, "env.sh")):
-        return f'. ./env.sh && {command}'
+    """Wrap command with env.sh sourcing if the file exists in task_dir.
+
+    Source by absolute path so the env activates even when the command does
+    `cd subdir && ...` before any env lookup — relative `. ./env.sh` would
+    miss if the script internally changes cwd and then looks up binaries.
+    """
+    env_sh = os.path.join(task_dir, "env.sh")
+    if os.path.isfile(env_sh):
+        return f'. "{os.path.abspath(env_sh)}" && {command}'
     return command
 
 

@@ -56,6 +56,15 @@ BENCH_COLS = {
     "sci_study":            ("new_cum_iters", "new_wall_max", "new_pass_rate"),
 }
 
+# Tasks that should repeat until PASS (any PASS verdict, including accepted_inflated).
+# Scheduled as the final phase, unbounded retries — loop until PASS or shutdown.
+# These tasks rely on TaskGroup memory that accumulates across attempts (driver
+# handles the memory file automatically at F/run/.taskgroup_memory/<group>.md).
+LOOP_UNTIL_PASS: Set[str] = {
+    'sci_study/fw_complete3_tiny',
+}
+LOOP_UNTIL_PASS_RETRIES = -1  # -1 = unbounded; only shutdown (SIGINT) stops the loop
+
 DEPS: Dict[str, List[str]] = {
     'system/env_warm':                              ['system/env_cold_pip'],
     'system/env_common':                            ['system/env_cold_pip'],
@@ -89,6 +98,32 @@ MEMHEAVY_PATTERNS = [
     r'mnist', r'torch', r'train', r'chain_mnist', r'paper_to_code', r'CWoLa', r'calo',
 ]
 
+
+def _avail_mb() -> int:
+    """Return MemAvailable in MB from /proc/meminfo, or large value on failure."""
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 999999
+
+
+def _wait_for_memory(min_mb: int, label: str = ""):
+    """Block until MemAvailable >= min_mb. Polls every 30s. Cooperative — also
+    bails out if shutdown is requested."""
+    if min_mb <= 0:
+        return
+    while not _shutdown.is_set():
+        avail = _avail_mb()
+        if avail >= min_mb:
+            return
+        print(f"[testbench] memory low: {avail}MB < {min_mb}MB target — waiting 30s before {label}",
+              flush=True)
+        time.sleep(30)
+
 # ============================================================================
 # Shutdown coordination
 # ============================================================================
@@ -99,6 +134,19 @@ _active_lock = threading.Lock()
 _sigint_count = 0
 
 
+def _killpg(proc: subprocess.Popen, sig: int) -> None:
+    """Send signal to the whole process group of proc (needs start_new_session=True)."""
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+    except Exception:
+        try:
+            proc.send_signal(sig)
+        except Exception:
+            pass
+
+
 def _sigint_handler(signum, frame):
     global _sigint_count
     _sigint_count += 1
@@ -107,18 +155,12 @@ def _sigint_handler(signum, frame):
         _shutdown.set()
         with _active_lock:
             for p in _active_procs:
-                try:
-                    p.terminate()
-                except Exception:
-                    pass
+                _killpg(p, signal.SIGTERM)
     else:
         print("\n[testbench] second SIGINT — killing now.", flush=True)
         with _active_lock:
             for p in _active_procs:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+                _killpg(p, signal.SIGKILL)
         os._exit(130)
 
 
@@ -374,11 +416,18 @@ def skip_reason(task: Task, gpus: int, slurm_ok: bool) -> Optional[str]:
 # ============================================================================
 
 def build_phases(tasks: List[Task]) -> List[List[Task]]:
-    """Kahn's algorithm → list of phases (tasks in a phase can run concurrently)."""
-    by_full = {t.full: t for t in tasks}
-    # Only use deps where both endpoints are in our set
-    indeg: Dict[str, int] = {t.full: 0 for t in tasks}
-    children: Dict[str, List[str]] = {t.full: [] for t in tasks}
+    """Kahn's algorithm → list of phases (tasks in a phase can run concurrently).
+
+    LOOP_UNTIL_PASS tasks are pulled out and appended as the final phase, one task
+    per final phase so they get dedicated time and don't share resources with others.
+    """
+    # Split out the loop-until-pass tasks
+    loop_tasks = [t for t in tasks if t.full in LOOP_UNTIL_PASS]
+    normal_tasks = [t for t in tasks if t.full not in LOOP_UNTIL_PASS]
+
+    by_full = {t.full: t for t in normal_tasks}
+    indeg: Dict[str, int] = {t.full: 0 for t in normal_tasks}
+    children: Dict[str, List[str]] = {t.full: [] for t in normal_tasks}
     for node, preds in DEPS.items():
         if node not in by_full:
             continue
@@ -401,10 +450,13 @@ def build_phases(tasks: List[Task]) -> List[List[Task]]:
                 if indeg[c] == 0:
                     next_ready.append(c)
         ready = next_ready
-    # Detect cycle
     remaining = set(indeg) - done
     if remaining:
         raise RuntimeError(f"Dependency cycle involving: {sorted(remaining)}")
+
+    # Append LOOP_UNTIL_PASS tasks as their own final phases (one per phase)
+    for t in sorted(loop_tasks, key=lambda x: x.full):
+        phases.append([t])
     return phases
 
 
@@ -533,10 +585,15 @@ def parse_log(log: Path) -> RunResult:
 def run_scif(task: Task, attempt: int, timeout_s: int) -> RunResult:
     log = _log_path(task, attempt)
     with log.open("w") as lf:
+        # start_new_session=True puts SciF in its own process group so we can
+        # killpg() the whole subtree (bash → apptainer → python driver).
+        # Without this, proc.kill() only hits the direct child and orphans
+        # the driver, which keeps running for hours after we "timeout".
         proc = subprocess.Popen(
             [str(SCIF), "RUN", task.full],
             stdout=lf, stderr=subprocess.STDOUT,
             cwd=str(ROOT),
+            start_new_session=True,
         )
         with _active_lock:
             _active_procs.add(proc)
@@ -545,11 +602,15 @@ def run_scif(task: Task, attempt: int, timeout_s: int) -> RunResult:
         except subprocess.TimeoutExpired:
             print(f"[testbench] TIMEOUT {task.full} try={attempt} after {timeout_s}s — killing",
                   flush=True)
-            proc.kill()
+            _killpg(proc, signal.SIGTERM)
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                pass
+                _killpg(proc, signal.SIGKILL)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             with _active_lock:
                 _active_procs.discard(proc)
@@ -676,6 +737,7 @@ class Runner:
         self.slow_iter_mult = args.slow_iter_mult
         self.slow_wall_mult = args.slow_wall_mult
         self.retry_on_slow = not args.no_retry_on_slow
+        self.min_free_mb = args.min_free_mb
         self.resume = args.resume
         self.monitor = Monitor()
 
@@ -713,11 +775,21 @@ class Runner:
         timeout_s = self._attempt_timeout(task, bench)
         final_verdict = "fail_persistent"
         ever_passed = False
-        for attempt in range(1, self.max_retry + 1):
+        # LOOP_UNTIL_PASS tasks loop until PASS (any PASS accepted, including inflated)
+        # — TaskGroup memory accumulates across attempts. max_attempts=-1 means unbounded.
+        is_loop = task.full in LOOP_UNTIL_PASS
+        max_attempts = LOOP_UNTIL_PASS_RETRIES if is_loop else self.max_retry
+        unbounded = max_attempts < 0
+        attempt = 0
+        while True:
+            attempt += 1
+            if not unbounded and attempt > max_attempts:
+                break
             if _shutdown.is_set():
                 final_verdict = "interrupted"
                 break
-            print(f"[run] {task.full} try={attempt}/{self.max_retry}", flush=True)
+            cap_str = "∞" if unbounded else str(max_attempts)
+            print(f"[run] {task.full} try={attempt}/{cap_str}", flush=True)
             t0 = time.time()
             res = run_scif(task, attempt, timeout_s)
             attempt_wall = time.time() - t0
@@ -728,9 +800,16 @@ class Runner:
             if res.status == "PASS":
                 ever_passed = True
 
-            attempts_left = self.max_retry - attempt
-            verdict = classify(res, bench, self.slow_iter_mult, self.slow_wall_mult,
-                               attempts_left, self.retry_on_slow)
+            # LOOP_UNTIL_PASS: any PASS is success; keep looping on non-PASS.
+            # Normal tasks: classify with slow/retry rules.
+            if is_loop and res.status == "PASS":
+                verdict = "accepted"
+            elif is_loop:
+                verdict = "retry"  # loop forever on non-PASS (shutdown breaks out above)
+            else:
+                attempts_left = max_attempts - attempt
+                verdict = classify(res, bench, self.slow_iter_mult, self.slow_wall_mult,
+                                   attempts_left, self.retry_on_slow)
             # If any prior attempt returned PASS, a later watchdog-killed attempt
             # must not downgrade the task to fail_persistent.
             if ever_passed and verdict == "fail_persistent":
@@ -760,12 +839,14 @@ class Runner:
         for t in phase:
             classes[resource_class(t)].append(t)
 
-        # Caps per class
+        # Caps per class — dynamic from resources (upstream adds auto-detect)
         gpu_cap = 1 if self.resources.gpus > 0 else 0
         caps = {"gpu": gpu_cap, "memheavy_cpu": self.resources.memheavy_cap,
                 "cpu": self.resources.cpu_parallel}
 
         def _run_one(t: Task) -> None:
+            # Wait for memory headroom before launching this task
+            _wait_for_memory(self.min_free_mb, label=t.full)
             bench = bench_by_group.get(t.group, {}).get(t.name)
             self.run_task(t, bench)
 
@@ -971,6 +1052,8 @@ def main():
                      help="retry on slow if iters > iter_max * this (default 1.5)")
     run.add_argument("--slow-wall-mult", type=float, default=10.0,
                      help="retry on slow if wall > wall_max * this (default 10.0)")
+    run.add_argument("--min-free-mb", type=int, default=4096,
+                     help="block new task launches while MemAvailable < this (MB; default 4096)")
 
     plan = sub.add_parser("plan", help="print the schedule without running")
     plan.add_argument("--groups", default=",".join(GROUPS))
