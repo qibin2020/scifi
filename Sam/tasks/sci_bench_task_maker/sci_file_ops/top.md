@@ -12,6 +12,11 @@ Pure file-system unit test. Create a small directory tree, write 5 files with
 deterministic content, compute the MD5 of each, and write a manifest CSV
 listing each file with its size and MD5.
 
+The shell is a standard Linux environment — `python3`, `md5sum`, `mkdir`, and
+`printf` are guaranteed available. Execute the full pipeline in a single bash
+call (a small python or shell script is ideal); do not pre-check tool
+availability with `which`/`pwd`/`ls` between steps.
+
 ## Todo
 
 1. Create directory `tree/sub1` and `tree/sub2`

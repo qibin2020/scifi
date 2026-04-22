@@ -13,6 +13,10 @@ The shared workspace `/mnt/sci_shared/` is pre-populated by the suite setup. It
 contains `seed.txt` with simple `key=value` lines. Read it, parse the lines,
 and write `parsed.json` with a JSON object mapping each key to its value.
 
+This is a trivial one-shot — `/mnt/sci_shared/seed.txt` is guaranteed to exist.
+Solve it directly with one `python3 -c '...'` call; do not `ls` the directory
+or `cat` the file first.
+
 ## Todo
 
 1. Read `/mnt/sci_shared/seed.txt`

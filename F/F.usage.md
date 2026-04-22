@@ -202,6 +202,50 @@ Metadata (all optional, inside `---` fences):
 - `SlurmHours: N` — wall hours for SLURM allocation (default: 4)
 - `SlurmCpus: N` — CPUs per task for SLURM allocation (default: 32)
 
+### Writing effective tasks
+
+A trivial task can still time out if the worker spends its LLM wall on
+exploratory bash (`ls`, `pwd`, `which`, re-`cat`-ing files it just wrote).
+Weaker rank-0 models are especially prone to this "analysis paralysis."
+The task text itself is the main lever to steer the worker toward direct
+execution.
+
+Guidelines for the `Context` block:
+
+- **State assumed environment explicitly.** Instead of leaving the agent to
+  verify, say "the shell is a standard Linux environment — `python3`, `md5sum`,
+  `mkdir` are available." This removes the incentive to `which`/`--version`-check.
+- **Encourage single-call execution for trivial tasks.** Add a sentence like
+  "solve with one `python3 -c '...'` call" or "chain setup, run, and write
+  into one bash script." Rank-0/1 tasks that finish in <1 minute on a human
+  shouldn't need five tool calls.
+- **Name any preconditions the suite already handles.** If `/mnt/foo` is
+  guaranteed by the setup, say so — otherwise the agent will defensively
+  `ls` it.
+- **Discourage intermediate verification** when the Expect section already
+  covers it. Agents that `cat result.txt` after writing it consume wall-time
+  without adding value; the reviewer will verify independently.
+
+Guidelines for `Todo`:
+
+- Prefer outcome-oriented steps over procedural ones. "Write `parsed.json`
+  mapping keys to values" is better than "1. list dir, 2. read file, 3. parse,
+  4. dump JSON" — the procedural form invites one LLM call per step.
+- For environment-setup tasks, phrase the sequence as a single imperative:
+  "create env, install X, write version to result.txt" rather than three
+  numbered steps.
+
+Guidelines for `Expect`:
+
+- Make each bullet something the reviewer can check with one tool call
+  (`read_file`, `grep`, `ls`). Expectations that require re-running the
+  worker's logic will slow review and are brittle.
+
+These patterns apply especially to tasks intended for rank-0/1 (cheap/weak
+workers). Higher-rank tasks (2+) face a different failure mode — toolchain
+friction and capability ceilings — and benefit more from `TaskGroup: <name>`
+for cross-run lessons, or explicit Context hints about known pitfalls.
+
 ### Run a task
 
 ```bash
