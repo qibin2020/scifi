@@ -16,34 +16,41 @@ R&D features at /mnt/lhco/data/features/:
 - labels.npy — 0=background (1M), 1=signal (100K)
 - feature_names: mj1(0), mj2(1), mjj(2), pt1(3), pt2(4), eta1(5), eta2(6), deta(7), dphi(8), dR(9), nconst1(10), nconst2(11), width1(12), width2(13), pt_ratio(14)
 
-**Method: CWoLa + VAE hybrid**
+**Method: weakly-supervised + density-based hybrid (CWoLa + VAE is the canonical baseline; you may deviate as long as the final score reaches the AUC target).**
 
-### CWoLa
 Signal is a resonance at ~3.5 TeV in dijet mass (mjj, index 2).
-1. Split events: signal_region (mjj > 3200 GeV) vs sideband (mjj ≤ 3200)
-2. Train GradientBoostingClassifier(n_estimators=300, max_depth=5, learning_rate=0.05, random_state=42) on ALL features EXCEPT mjj (drop index 2, use remaining 14)
-3. If training set > 200K, subsample to 200K (100K per class) for speed
-4. Score ALL events: predict_proba(X_no_mjj)[:, 1]
 
-### VAE
-1. Select 5 features: pt1(3), pt2(4), mjj(2), width1(12), width2(13)
-2. Preprocess: log1p, then StandardScaler fit on background only. Save scaler.
-3. Architecture with BatchNorm:
-   ```
-   Encoder: Linear(5,32)->BN(32)->LeakyReLU -> Linear(32,16)->BN(16)->LeakyReLU -> fc_mu(16,2), fc_logvar(16,2)
-   Decoder: Linear(2,16)->BN(16)->LeakyReLU -> Linear(16,32)->BN(32)->LeakyReLU -> Linear(32,5)
-   ```
-4. Train on background only, Adam lr=1e-3, batch=4096, 10 epochs. Loss = MSE + 0.5*KL.
-5. Score ALL events: MSE reconstruction error + 0.5 * KL per event
+### Suggested baseline (CWoLa)
+Train a classifier (e.g. GradientBoostingClassifier with n_estimators≈300, max_depth≈5,
+learning_rate≈0.05) to discriminate "signal_region" vs "sideband" on all features except mjj.
+A typical SR/SB split is mjj > 3200 GeV vs mjj ≤ 3200, but you may narrow or shift the
+split (e.g. SR=[3.4, 3.6] TeV, SB=[2.0, 3.2] ∪ [3.8, 4.2] TeV) if it helps performance.
+Score ALL events with predict_proba.
+
+### Suggested baseline (VAE)
+Select a small set of jet-substructure features (e.g. pt1, pt2, width1, width2, optionally
+mjj). Preprocess with log1p + StandardScaler fit on background only. Train a small VAE
+(latent dim ~2, BatchNorm encoder/decoder) on background only with Adam lr≈1e-3,
+batch≈4096, ≥10 epochs. Score all events with MSE + β·KL (β around 0.1–1).
 
 ### Hybrid
-1. Min-max normalize CWoLa and VAE scores to [0,1]
-2. score = 0.7 * norm(CWoLa) + 0.3 * norm(VAE)
+Combine the two scores after normalising each to [0, 1]; tune the mix (e.g. 0.7·CWoLa + 0.3·VAE
+is a reasonable starting point but other splits or rank-based combinations are fine).
+
+### Freedom
+You may swap any component (different classifier, different VAE depth, alternative density
+estimator, different feature subsets, narrower SR, multiple ensemble seeds and average) as
+long as: (a) the method is unsupervised or weakly supervised (no use of `labels.npy`
+during fitting), (b) results files are produced as listed in Expect, (c) final hybrid AUC
+on the full dataset against `labels.npy` is **strictly above 0.78**. If a single seed gives
+unstable AUC, average over a few seeds and pick the median.
 
 **Package constraints:** `pip install 'torch>=2.0,<2.5' 'scipy<1.14' 'matplotlib<3.9' scikit-learn`
 Set `export HOME=/tmp && export MPLCONFIGDIR=/tmp/mpl && mkdir -p /tmp/mpl` before matplotlib.
 
-Target: AUC > 0.78.
+Target: AUC > 0.78. If after two distinct attempts your hybrid AUC stays under 0.6,
+the dataset may not contain the expected signal — print the AUC and bail rather than
+fabricating a passing metric.
 
 ## Todo
 
