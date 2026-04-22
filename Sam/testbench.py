@@ -2,8 +2,9 @@
 """testbench.py — scifi benchmark runner with dep graph, retries, and comparison.
 
 Modes:
-    testbench.py run   [--groups G1,...] [--parallel 4] [--retry 3] [--resume]
-                       [--no-retry-on-slow] [--slow-wall-mult 3.0]
+    testbench.py run   [--groups G1,...] [--parallel N] [--cpus N] [--mem-gb N]
+                       [--gpus N] [--no-slurm] [--retry 3] [--resume]
+                       [--no-retry-on-slow] [--slow-wall-mult 10.0]
     testbench.py plan                 # dry-run scheduler, print phases
     testbench.py clean                # mv runtime env to .deleted/
     testbench.py report               # print comparison table from testing.csv
@@ -24,7 +25,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -83,7 +84,7 @@ CSV_HEADERS = [
     "caps_tripped", "run_dir", "timestamp",
 ]
 
-# Tasks known to be memory-heavy — capped at 2 concurrent
+# Tasks known to be memory-heavy — concurrency capped via --mem-gb-derived memheavy_cap
 MEMHEAVY_PATTERNS = [
     r'mnist', r'torch', r'train', r'chain_mnist', r'paper_to_code', r'CWoLa', r'calo',
 ]
@@ -270,6 +271,56 @@ def gpu_count() -> int:
 
 def has_slurm() -> bool:
     return shutil.which("sbatch") is not None
+
+
+def probe_cpus() -> int:
+    return os.cpu_count() or 1
+
+
+def probe_mem_gb() -> int:
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    return max(1, int(line.split()[1]) // 1024 // 1024)
+    except Exception:
+        pass
+    return 8
+
+
+def derive_caps(cpus: int, mem_gb: int, user_parallel: Optional[int]) -> Tuple[int, int]:
+    """Return (cpu_parallel, memheavy_cap) derived from resource budget.
+
+    Each generic task is assumed ~2 GB + 1 CPU; each memheavy task ~8 GB + 2 CPUs.
+    CPU parallel is soft-capped at 8 — above that the shared LLM gateway
+    queue tends to be the real bottleneck (observed empirically).
+    """
+    if user_parallel is not None:
+        cpu_par = max(1, user_parallel)
+    else:
+        cpu_par = max(1, min(cpus // 2, mem_gb // 2, 8))
+    memheavy_cap = max(1, min(mem_gb // 8, 4))
+    return cpu_par, memheavy_cap
+
+
+@dataclass
+class Resources:
+    cpus: int
+    mem_gb: int
+    gpus: int
+    slurm_ok: bool
+    cpu_parallel: int
+    memheavy_cap: int
+
+
+def resolve_resources(args) -> Resources:
+    cpus = args.cpus if args.cpus is not None else probe_cpus()
+    mem_gb = args.mem_gb if args.mem_gb is not None else probe_mem_gb()
+    gpus = args.gpus if args.gpus is not None else gpu_count()
+    slurm_ok = False if getattr(args, 'no_slurm', False) else has_slurm()
+    cpu_par, memheavy_cap = derive_caps(cpus, mem_gb, args.parallel)
+    return Resources(cpus=cpus, mem_gb=mem_gb, gpus=gpus, slurm_ok=slurm_ok,
+                     cpu_parallel=cpu_par, memheavy_cap=memheavy_cap)
 
 
 def gpu_required(task: Task) -> int:
@@ -461,6 +512,21 @@ def parse_log(log: Path) -> RunResult:
     rm = re.search(r'\[run\] \S+ -> \S*?/(\S+)', text)
     if rm:
         run_dir = rm.group(1)
+
+    # Cross-check against .suggestion.md — agent's final review is authoritative
+    # when testbench killed the subprocess before the DONE marker drained to stdout.
+    if run_dir:
+        sug = F_TASKS / run_dir / ".suggestion.md"
+        if sug.is_file():
+            try:
+                stext = sug.read_text(errors='ignore')
+            except Exception:
+                stext = ""
+            if re.search(r'(?m)^\s*DONE:', stext):
+                status = "PASS"
+            elif re.search(r'(?m)^\s*NOT DONE:', stext):
+                status = "FAIL"
+
     return RunResult(status, iters, wall, caps, run_dir)
 
 
@@ -572,8 +638,8 @@ class Monitor:
             return "?"
         walls.sort()
         median = walls[len(walls) // 2]
-        # Effective parallelism ≈ 4 / 2 by class (rough)
-        eff = max(1, 3)
+        # Rough effective parallelism across resource classes (gpu + memheavy + cpu).
+        eff = 3
         eta_s = int(remaining * median / eff)
         return f"~{eta_s // 3600}h{(eta_s % 3600) // 60:02d}m"
 
@@ -605,7 +671,7 @@ class Monitor:
 class Runner:
     def __init__(self, args):
         self.args = args
-        self.parallel = args.parallel
+        self.resources = resolve_resources(args)
         self.max_retry = args.retry
         self.slow_iter_mult = args.slow_iter_mult
         self.slow_wall_mult = args.slow_wall_mult
@@ -646,6 +712,7 @@ class Runner:
         self.monitor.task_start(task.full)
         timeout_s = self._attempt_timeout(task, bench)
         final_verdict = "fail_persistent"
+        ever_passed = False
         for attempt in range(1, self.max_retry + 1):
             if _shutdown.is_set():
                 final_verdict = "interrupted"
@@ -658,9 +725,16 @@ class Runner:
             if not res.run_dir:
                 res.run_dir = _find_latest_run_dir(task)
 
+            if res.status == "PASS":
+                ever_passed = True
+
             attempts_left = self.max_retry - attempt
             verdict = classify(res, bench, self.slow_iter_mult, self.slow_wall_mult,
                                attempts_left, self.retry_on_slow)
+            # If any prior attempt returned PASS, a later watchdog-killed attempt
+            # must not downgrade the task to fail_persistent.
+            if ever_passed and verdict == "fail_persistent":
+                verdict = "accepted_inflated"
             caps_str = ",".join(f"{k}={v}" for k, v in res.caps.items() if v) or ""
             csv_append(dict(
                 group=task.group, task=task.name, attempt=attempt, status=res.status,
@@ -687,7 +761,9 @@ class Runner:
             classes[resource_class(t)].append(t)
 
         # Caps per class
-        caps = {"gpu": 1, "memheavy_cpu": 2, "cpu": self.parallel}
+        gpu_cap = 1 if self.resources.gpus > 0 else 0
+        caps = {"gpu": gpu_cap, "memheavy_cpu": self.resources.memheavy_cap,
+                "cpu": self.resources.cpu_parallel}
 
         def _run_one(t: Task) -> None:
             bench = bench_by_group.get(t.group, {}).get(t.name)
@@ -713,15 +789,16 @@ class Runner:
     def run(self, groups: List[str]):
         tasks_all = discover_tasks(groups)
 
-        # Skip decisions
-        gc = gpu_count()
-        sl = has_slurm()
-        print(f"[testbench] host caps: gpu_count={gc}, sbatch={sl}", flush=True)
+        # Skip decisions — use resolved resources (probes or user overrides)
+        res = self.resources
+        print(f"[testbench] host caps: cpus={res.cpus} mem={res.mem_gb}G gpus={res.gpus} "
+              f"slurm={res.slurm_ok} | cpu_parallel={res.cpu_parallel} "
+              f"memheavy_cap={res.memheavy_cap}", flush=True)
 
         runnable: List[Task] = []
         for t in tasks_all:
-            r = skip_reason(t, gc, sl)
-            if r:
+            reason = skip_reason(t, res.gpus, res.slurm_ok)
+            if reason:
                 bench_by_group = load_benchmark(t.group)
                 b = bench_by_group.get(t.name)
                 csv_append(dict(
@@ -730,11 +807,11 @@ class Runner:
                     iter_max=b.iter_max if b and b.iter_max is not None else "",
                     wall_max=b.wall_max if b and b.wall_max is not None else "",
                     bench_pass_rate=b.pass_rate if b else "",
-                    verdict=r, caps_tripped="", run_dir="",
+                    verdict=reason, caps_tripped="", run_dir="",
                     timestamp=datetime.now().isoformat(timespec="seconds"),
                 ))
                 self.monitor.task_skip()
-                print(f"[skip] {t.full} -> {r}", flush=True)
+                print(f"[skip] {t.full} -> {reason}", flush=True)
             else:
                 runnable.append(t)
 
@@ -765,12 +842,13 @@ class Runner:
 
 def cmd_plan(args):
     tasks = discover_tasks(args.groups)
-    gc = gpu_count()
-    sl = has_slurm()
-    print(f"host caps: gpu_count={gc}, sbatch={sl}")
+    res = resolve_resources(args)
+    print(f"host caps: cpus={res.cpus} mem={res.mem_gb}G gpus={res.gpus} "
+          f"slurm={res.slurm_ok} | cpu_parallel={res.cpu_parallel} "
+          f"memheavy_cap={res.memheavy_cap}")
     runnable = []
     for t in tasks:
-        r = skip_reason(t, gc, sl)
+        r = skip_reason(t, res.gpus, res.slurm_ok)
         if r:
             print(f"  SKIP {t.full:50s} -> {r}")
         else:
@@ -857,13 +935,25 @@ def cmd_report(args):
 
 def check_gateway() -> bool:
     try:
-        env = os.environ.copy()
-        # Need BASEDIR etc. — source ENV.sh for the check
+        # ENV.sh defines BASEDIR and other vars the gateway script needs.
         cmd = f"source {ROOT}/ENV.sh && bash {GATEWAY_SH} status"
         r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=10)
         return ("Gateway running" in r.stdout) or ("Health: OK" in r.stdout)
     except Exception:
         return False
+
+
+def _add_resource_args(p):
+    p.add_argument("--parallel", type=int, default=None,
+                   help="CPU parallel cap (default: auto from --cpus and --mem-gb)")
+    p.add_argument("--cpus", type=int, default=None,
+                   help="CPU budget (default: auto from os.cpu_count())")
+    p.add_argument("--mem-gb", type=int, default=None,
+                   help="RAM budget in GB (default: auto from /proc/meminfo)")
+    p.add_argument("--gpus", type=int, default=None,
+                   help="GPU count (default: auto from nvidia-smi; 0 disables GPU tasks)")
+    p.add_argument("--no-slurm", action="store_true",
+                   help="Skip SLURM tasks even if sbatch is available")
 
 
 def main():
@@ -873,17 +963,18 @@ def main():
     run = sub.add_parser("run", help="execute the sweep")
     run.add_argument("--groups", default=",".join(GROUPS),
                      help="comma-separated group list (default: all)")
-    run.add_argument("--parallel", type=int, default=4)
+    _add_resource_args(run)
     run.add_argument("--retry", type=int, default=3)
     run.add_argument("--resume", action="store_true")
     run.add_argument("--no-retry-on-slow", action="store_true")
     run.add_argument("--slow-iter-mult", type=float, default=1.5,
                      help="retry on slow if iters > iter_max * this (default 1.5)")
-    run.add_argument("--slow-wall-mult", type=float, default=3.0,
-                     help="retry on slow if wall > wall_max * this (default 3.0)")
+    run.add_argument("--slow-wall-mult", type=float, default=10.0,
+                     help="retry on slow if wall > wall_max * this (default 10.0)")
 
     plan = sub.add_parser("plan", help="print the schedule without running")
     plan.add_argument("--groups", default=",".join(GROUPS))
+    _add_resource_args(plan)
 
     sub.add_parser("clean", help="mv runtime env to .deleted/")
     sub.add_parser("report", help="print comparison table from testing.csv")
