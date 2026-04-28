@@ -45,6 +45,9 @@ model_list:
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
       keep_alive: "30m"
+      max_parallel_requests: 6        # Pam-side semaphore: queues req #7 transparently,
+                                      # so Ollama's "too many concurrent" 429 never fires.
+                                      # See gateway_overhead_study.md §router.py:2164 (asyncio.Semaphore).
 
   # ── Other Ollama Cloud models — disabled while gemma4 is the focus ──
   # Re-enable + add keep_alive: "30m" + a second deployment per model when needed.
@@ -86,6 +89,7 @@ model_list:
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
       keep_alive: "30m"
+      max_parallel_requests: 6
     model_info:
       priority: 0
   # - model_name: fallback
@@ -128,6 +132,7 @@ model_list:
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
       keep_alive: "30m"
+      max_parallel_requests: 6
     model_info:
       priority: 0
   # - model_name: ui
@@ -252,14 +257,15 @@ router_settings:
   # wall-clock time, then num_retries cannot rescue and the client sees 5xx.
   # Goal: minimize LLM time in total wall — short cooldown, retry rolls forward.
   routing_strategy: least-busy   # route to fewest-in-flight deployment (no Redis); harmless with 1 deployment, helpful with N
-  num_retries: 5                 # cross-deployment retry budget — silently absorbs concurrency bursts
+  num_retries: 60                # high — absorbs upstream bursts transparently, gives caller smooth latency instead of 429
   retry_after: 1                 # Ollama concurrency-429 slot clears in ms
   allowed_fails: 5               # only cooldown after 5 *consecutive* fails — real outage signal, not a transient burst
   cooldown_time: 5               # short circuit-breaker, not a wall-clock penalty
   enable_pre_call_checks: true
   retry_policy:
-    RateLimitError: 2
+    RateLimitError: 5
     AuthenticationError: 0
 
 litellm_settings:
   modify_params: true
+  request_timeout: 300           # backstop on pathological queue depth — caller never blocks > 5 min per call
