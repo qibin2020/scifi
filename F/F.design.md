@@ -407,36 +407,42 @@ Pause mechanics:
 
 ## 6. Timing System
 
-### 6.1 Wall Limit (LLM-only)
+Three knobs bound a SAM run; whichever fires first wins.
 
-Per-rank wall limit counting only LLM API call time (excludes bash/tool time):
+### 6.1 Iteration Cap
+
 ```
-WALL_LIMIT_PER_RANK = "60,120,240,300,360,600"
-# rank 0: 60s, rank 1: 120s, ..., rank 4+: 300-600s
+MAX_ITERATIONS = 50      # global per-SAM cap, not rank-scaled
 ```
 
-Task .md can override: `Timeout: 120`
+A SAM gets up to `MAX_ITERATIONS` effective iterations (read-only iters are
+free — see sec 7). Rank no longer scales this; rank only hints model
+selection in Pam.
 
-### 6.2 Total Wall Limit (including bash/tool time)
+### 6.2 LLM-Only Wall (per-task, opt-in)
 
-Hard clock limit to prevent runaway tasks:
+The driver enforces a wall limit that excludes bash/subagent time *only when
+the task explicitly opts in*. There is no rank-default. Tasks set it via
+metadata:
+
 ```
-TOTAL_WALL_PER_RANK = "1800,1800,1800,1800,1800,1800"
-# all ranks: 30min (uniform hard cap)
+Timeout: 120          # seconds of LLM time
+ThinkTime: 600        # alternative name (also accepted); -1 disables
+```
+
+If neither is set, no LLM-only wall is enforced — only the iteration cap
+and the total wall limit apply.
+
+### 6.3 Total Wall Limit (per-rank, includes bash)
+
+Hard clock limit that DOES count bash/tool time:
+```
+TOTAL_WALL_PER_RANK = "300,600,1200,1800,3600,3600"   # driver fallback (varied per rank)
+# ENV.sh ships a uniform override: TOTAL_WALL_PER_RANK=3600,3600,3600,3600,3600,3600  (1 hr)
 ```
 
 This catches tasks where bash calls consume hours while LLM time stays low.
-
-### 6.3 Per-Rank Iteration Limits
-
-Lower ranks get fewer iterations — a rank-0 task needing 50 iterations is misranked:
-```
-ITER_LIMIT_PER_RANK = "10,20,30,30,50,50"
-# rank 0: 10 iters, rank 1: 20, rank 2-3: 30, rank 4+: 50
-```
-
-When review escalates rank on retry, the new (higher) limits apply automatically.
-MAX_ITERATIONS (50) is the absolute cap regardless of rank.
+`BashTime: -1` in task metadata disables this cap (long bash workloads opt in).
 
 ### 6.4 Bash Timeout
 
@@ -557,9 +563,15 @@ TaskGroup are fully handled by the outer system and invisible to the agent.
 
 ### 6.8 Early Break
 
-- 5 consecutive nudges (text-only, no tool calls) → break to review
-- 5 consecutive API errors → break to review
-- Both trigger review for potential model rotation/escalation
+- `NUDGE_LIMIT` consecutive nudges (text-only, no tool calls) → break to review
+- `ERROR_LIMIT` consecutive API errors → break to review
+- Both trigger review for potential model rotation/escalation, and blacklist the
+  worker model for the rest of the session via `pam.blacklist_model()`
+
+Both thresholds default to **5** and are env-tunable (see sec 14). Raise to be
+more tolerant of upstream flake (e.g. Ollama Cloud burst 5xx); lower for
+tighter detection of fundamentally broken models. The cap exists to avoid
+hammering on a model with bad credentials, malformed id, or gateway misroute.
 
 ---
 
@@ -572,7 +584,7 @@ TaskGroup are fully handled by the outer system and invisible to the agent.
 | Task content | 4000 chars | CAP_TASK |
 | Global memory | 1000 chars | CAP_GLOBAL |
 | Task memory | 4000 chars | CAP_MEMORY |
-| Tool results | 10000 chars | _truncate() — head + last 5 lines |
+| Tool results | TOOL_RESULT_CAP (default 10000) | _truncate() — head + last 5 lines |
 | Checkpoint task | 4000 chars | CAP_TASK |
 | Checkpoint memory | 4000 chars | CAP_MEMORY |
 
@@ -730,7 +742,7 @@ MAX_ITERATIONS or WALL_LIMIT → review(failed)
   → retry: update memory + model control + re-run
   → reflect: diagnose, return REFLECTION
 
-MAX_RECOVERY = 3 prevents infinite delay/retry recursion
+MAX_RECOVERY (default 3, env-tunable) prevents infinite delay/retry recursion
 ```
 
 ### 10.3 Model Control on Retry
@@ -842,6 +854,7 @@ Plan top-level fields:
 | `state_paths` | `["F/mnt"]` | what counts as "state" for fresh/pin/restore |
 | `lock_model` | none | rewrite `Pam/gateway.rank.yaml` to enable only this model. Backup at `<file>.bench-backup-<ts>`; restored on completion (or in `finally` on Ctrl-C). |
 | `total_wall_s` | none | override `ENV.sh:TOTAL_WALL_PER_RANK` uniformly. Backup + restore as above. |
+| `max_retries` | none | override `ENV.sh:MAX_RETRIES`. Shares the ENV.sh backup with `total_wall_s` (no double-backup). |
 | `gateway_probe` | thresholds | abort thresholds for the pre-bench probe |
 | `batches` | required | sequence of batches |
 
@@ -849,7 +862,16 @@ Each batch: `name`, `task`, `n` (default 1), `parallel` (default 1, with
 3 s stagger between launches), `state` (`fresh` / `inherit` / `<pin_name>`),
 optional `pin: <name>` (snapshot state after batch via `cp -al`).
 
-Run with: `tools/bench/bench.py <plan>.json [--skip-probe]`
+The `<pin_name>` may refer to either (a) a pin created by an earlier batch in
+the same plan, or (b) an existing pin on disk in `tools/bench/states/<name>/`
+left over from a prior bench invocation. This lets a follow-up plan reuse a
+warm pin (e.g. fpga toolchain) without redoing bootstrap.
+
+Run with: `tools/bench/bench.py <plan>.json [--skip-probe] [--probe-between]`
+
+`--probe-between` runs a lightweight TPS sweep after every batch and records
+the deltas vs the initial probe in the report's `inter_probes` array — useful
+for catching gateway degradation across long runs.
 
 **Why post-hoc cam-log attribution:** `cam.py` names logs with 1-second
 precision (`driver_<task>_<YYYYMMDDHHMMSS>.jsonl`). With parallel runs
@@ -988,9 +1010,12 @@ Per-job env overrides (benchmarks / parallel runs):
 | `MAX_RETRIES` | 3 | Review rejections before reflect |
 | `MAX_PARALLEL_AGENTS` | 4 | Concurrent subtask limit |
 | `MAX_BASH_TIME` | 300 | Global bash timeout cap |
-| `WALL_LIMIT_PER_RANK` | 60,120,240,300,360,600 | Per-rank LLM-only wall limit (excludes bash) |
-| `ITER_LIMIT_PER_RANK` | 10,20,30,30,50,50 | Per-rank iteration cap |
-| `TOTAL_WALL_PER_RANK` | 1800,1800,1800,1800,1800,1800 | Per-rank total wall limit (incl. bash) |
+| `TOTAL_WALL_PER_RANK` | 300,600,1200,1800,3600,3600 | Per-rank total wall limit (incl. bash). ENV.sh ships uniform 3600. |
+| `ERROR_LIMIT` | 5 | Consecutive API errors before pam blacklists the worker model (sec 6.8) |
+| `NUDGE_LIMIT` | 5 | Consecutive no-tool-call / malformed-tool turns before blacklist (sec 6.8) |
+| `MAX_RECOVERY` | 3 | Delay/retry rounds after LOOP_EXHAUSTED before giving up (sec 10.2) |
+| `MAX_REVIEW_ITER_VERIFY` | 30 | Iter floor for done-case reviews on verify-heavy Expects |
+| `TOOL_RESULT_CAP` | 10000 | Chars kept of bash/read_file tool result (head + last 5 lines) |
 | `SKILLS_DIR` | ./skills | Skill library path |
 | `MAX_EVOLVE_ITER` | 20 | Evolution iteration limit |
 
@@ -1064,8 +1089,6 @@ ENV.sh (host)
 | `MAX_RETRIES` | `3` | portal.py (driver) | driver.py |
 | `MAX_PARALLEL_AGENTS` | `4` | portal.py (driver) | driver.py |
 | `MAX_BASH_TIME` | `300` | portal.py (driver) | driver.py |
-| `WALL_LIMIT_PER_RANK` | `60,120,240,300,360,600` | portal.py (driver) | driver.py |
-| `ITER_LIMIT_PER_RANK` | `10,20,30,40,50,50` | portal.py (driver) | driver.py |
 | `TOTAL_WALL_PER_RANK` | `300,600,1200,1800,3600,3600` | portal.py (driver) | driver.py |
 | `SKILLS_DIR` | `/srv/skills` | portal.py (driver), task_maker.sh, skill_maker.sh | driver.py, skill_maker.py |
 | `MAX_EVOLVE_ITER` | `20` | portal.py (evolution) | evolution.py |

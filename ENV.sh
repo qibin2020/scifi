@@ -122,27 +122,36 @@ export DEFAULT_ENV_SKILL=temp_env
 ## Driver — limits
 ##
 ## System-level limits are intentionally minimal:
-##   - MAX_ITERATIONS: per-SAM inner-loop iteration cap
+##   - MAX_ITERATIONS: per-SAM iteration cap (single global cap, no per-rank scaling)
 ##   - MAX_RETRIES   : SAM retry budget — # of RALPH attempts before giveup
 ##   - MAX_BASH_TIME : per-bash-call timeout (only applies when task BashTime != -1)
-##   - TOTAL_WALL_PER_RANK: hard clock safety cap (mainly for testing; real
-##     workloads can extend this freely)
+##   - TOTAL_WALL_PER_RANK: per-rank total wall incl. bash — hard clock safety cap
+##     (rank otherwise only hints model selection in Pam; it does not scale iters
+##     or LLM-only wall — those come from MAX_ITERATIONS and per-task Timeout).
 ##
-## Per-rank LLM-wall and per-rank iter caps are deliberately NOT set here —
-## driver.py uses sensible defaults. Override only if you have a measured reason.
-##
-export MAX_ITERATIONS=50
-export CHECKPOINT_EVERY=5
-export MAX_CONTEXT=80
-export MAX_DEPTH=5
-export MAX_REVIEW_ITER=100
-export MAX_REFLECT_ITER=15
-export MAX_RETRIES=5
-export MAX_PARALLEL_AGENTS=4
-export MAX_BASH_TIME=300
-# export WALL_LIMIT_PER_RANK=...   # use driver default
-# export ITER_LIMIT_PER_RANK=...   # use driver default
-export TOTAL_WALL_PER_RANK=3600,3600,3600,3600,3600,3600   # 1 hr uniform safety cap
+export MAX_ITERATIONS=50         # global per-SAM iteration cap
+export CHECKPOINT_EVERY=5        # re-ground every N effective iters (re-inject task + memory)
+export MAX_CONTEXT=80            # max LLM messages kept before trim (first 2 + last N-3)
+export MAX_DEPTH=5               # max subtask nesting depth
+export MAX_REVIEW_ITER=100       # review agent iter limit (verify/triage)
+export MAX_REFLECT_ITER=15       # reflection agent iter limit (after MAX_RETRIES exhausted)
+export MAX_RETRIES=5             # SAM RALPH-retry budget — review rejections before reflect
+export MAX_PARALLEL_AGENTS=4     # concurrent subtask cap (scheduler semaphore)
+export MAX_BASH_TIME=300         # per-bash-call timeout cap (BashTime: -1 in task disables)
+export TOTAL_WALL_PER_RANK=3600,3600,3600,3600,3600,3600   # per-rank total wall incl. bash; 1 hr uniform safety cap
+
+## Driver — robustness knobs (all optional; driver.py + portal.py fall back to
+## the defaults shown). ERROR_LIMIT and NUDGE_LIMIT both trigger session-level
+## model blacklist when the threshold is hit; raise to be more tolerant of
+## upstream flake (Ollama Cloud bursts, transient 5xx), lower for tighter
+## detection of fundamentally broken models. MAX_RECOVERY caps delay/retry
+## rounds after LOOP_EXHAUSTED. MAX_REVIEW_ITER_VERIFY and TOOL_RESULT_CAP
+## are budget knobs (no blacklist effect).
+# export ERROR_LIMIT=5             # consecutive API errors → blacklist worker model
+# export NUDGE_LIMIT=5             # consecutive no-tool / malformed-tool turns → blacklist
+# export MAX_RECOVERY=3            # delay/retry rounds after LOOP_EXHAUSTED before giving up
+# export MAX_REVIEW_ITER_VERIFY=30 # iter floor for verify-heavy done-case reviews
+# export TOOL_RESULT_CAP=10000     # chars kept of bash/read_file tool result (head + last 5 lines)
 
 ## Evolution
 export MAX_EVOLVE_ITER=20

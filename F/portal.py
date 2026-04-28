@@ -460,9 +460,12 @@ def build_driver_cmd(task_name, extra_args):
         "MAX_RETRIES": _env("MAX_RETRIES"),
         "MAX_PARALLEL_AGENTS": _env("MAX_PARALLEL_AGENTS"),
         "MAX_BASH_TIME": _env("MAX_BASH_TIME"),
-        "WALL_LIMIT_PER_RANK": _env("WALL_LIMIT_PER_RANK"),
-        "ITER_LIMIT_PER_RANK": _env("ITER_LIMIT_PER_RANK"),
         "TOTAL_WALL_PER_RANK": _env("TOTAL_WALL_PER_RANK"),
+        # ERROR_LIMIT, NUDGE_LIMIT, MAX_RECOVERY, MAX_REVIEW_ITER_VERIFY,
+        # TOOL_RESULT_CAP are intentionally not forwarded — they're driver-
+        # internal knobs, commented out in ENV.sh by default; driver.py's
+        # os.environ.get(name, default) handles them. To override, uncomment
+        # in ENV.sh AND add the forward here.
         "SKILLS_DIR": "/srv/skills",
         "EFFECTIVE_COMMON_STORAGE": common_storage,
         "EFFECTIVE_COMMON_HOME": common_home,

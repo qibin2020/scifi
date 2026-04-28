@@ -53,6 +53,15 @@ class Pam:
 
     @staticmethod
     def _parse_rank_yaml(text):
+        # Strip inline `# ...` comments before parsing a value. Real YAML only
+        # treats '#' as a comment when preceded by whitespace; we split on the
+        # bare '#' for simplicity. Safe here because our scalars (model names,
+        # ints, bools) never legitimately contain '#'. Without this strip,
+        # `name: gemma4   # 31b` becomes the literal name `gemma4   # 31b`,
+        # which the gateway then rejects with a 400.
+        def _val(line_after_colon):
+            return line_after_colon.split('#', 1)[0].strip()
+
         result = {"models": [], "connection_max": 10}
         current = None
         for line in text.split('\n'):
@@ -62,19 +71,19 @@ class Pam:
             if s.startswith('- rank:'):
                 if current:
                     result["models"].append(current)
-                current = {"rank": int(s.split(':')[1].strip()), "budget": -1}
+                current = {"rank": int(_val(s.split(':', 1)[1])), "budget": -1}
             elif s.startswith('name:') and current is not None:
-                current["name"] = s.split(':', 1)[1].strip()
+                current["name"] = _val(s.split(':', 1)[1])
             elif s.startswith('budget:') and current is not None:
-                current["budget"] = int(s.split(':')[1].strip())
+                current["budget"] = int(_val(s.split(':', 1)[1]))
             elif s.startswith('thinkable:') and current is not None:
-                current["thinkable"] = s.split(':')[1].strip().lower() == 'true'
+                current["thinkable"] = _val(s.split(':', 1)[1]).lower() == 'true'
             elif s.startswith('max_thinking_budget:') and current is not None:
-                current["max_thinking_budget"] = int(s.split(':')[1].strip())
+                current["max_thinking_budget"] = int(_val(s.split(':', 1)[1]))
             elif s.startswith('max_tokens:') and current is not None:
-                current["max_tokens"] = int(s.split(':')[1].strip())
+                current["max_tokens"] = int(_val(s.split(':', 1)[1]))
             elif s.startswith('connection_max:'):
-                result["connection_max"] = int(s.split(':')[1].strip())
+                result["connection_max"] = int(_val(s.split(':', 1)[1]))
         if current:
             result["models"].append(current)
         return result

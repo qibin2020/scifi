@@ -448,21 +448,19 @@ Refined style fastest (123s avg), simple slowest (174s avg).
 
 ---
 
-## Per-rank limits
+## Limits
 
-Iteration count and wall time scale with task rank. Higher-ranked tasks get more room.
+Three caps bound any SAM run; whichever fires first wins.
+
+| Cap | Default | Scope | Where |
+|-----|---------|-------|-------|
+| Iteration cap | `MAX_ITERATIONS=50` | Global, all ranks | `ENV.sh` |
+| LLM-only wall | (off unless task opts in) | Per-task `Timeout` / `ThinkTime` metadata | `top.md` |
+| Total wall (incl. bash) | `TOTAL_WALL_PER_RANK=3600,...` (uniform 1hr) | Per-rank, includes bash time | `ENV.sh` |
 
 **Read-only iterations are free:** only iterations with mutating tool calls (`bash`, `write_file`, `edit_file`, `done`, `subagent`) count against the budget. `read_file`, `memory_read`, and `compact` calls don't consume iterations, so agents can freely explore source files without penalty.
 
-| Rank | Max effective iters | LLM wall | Total wall (incl. bash) |
-|------|---------------------|----------|-------------------------|
-| 0 (trivial) | 10 | 60s | 30min |
-| 1 (typical) | 20 | 120s | 30min |
-| 2 (reasoning) | 30 | 240s | 30min |
-| 3 (hard) | 30 | 300s | 30min |
-| 4+ (very hard) | 50 | 360-600s | 30min |
-
-Configurable via `ITER_LIMIT_PER_RANK`, `WALL_LIMIT_PER_RANK`, `TOTAL_WALL_PER_RANK` in `ENV.sh`. When review escalates rank on retry, the new (higher) limits apply automatically.
+**Rank does NOT scale iteration or wall budgets** — it only hints model selection in Pam (which model tier handles the task). To give a task more LLM time, set `Timeout: N` (or `ThinkTime: N`) in its metadata. To give it more wall time including long bash, set `BashTime: -1` to disable the total wall cap.
 
 ---
 

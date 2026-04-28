@@ -169,8 +169,7 @@ Chat with `SciFi` to explore the system (e.g. `task maker` and `skill maker`), o
 | `SCIFI_MODEL` | Model group for the SciFi natural language interface |
 | `DEFAULT_ENV_SKILL` | Env skill auto-injected when a task declares none (`temp_env` / `local_env` / `common_env`) |
 | `MAX_ITERATIONS`, `MAX_DEPTH`, `MAX_RETRIES` | Agent loop limits |
-| `WALL_LIMIT_PER_RANK`, `ITER_LIMIT_PER_RANK` | Per-rank time and iteration budgets (comma-separated, rank 0 to 5) |
-| `TOTAL_WALL_PER_RANK` | Hard wall-clock cap per rank |
+| `TOTAL_WALL_PER_RANK` | Hard wall-clock cap per rank (includes bash time) |
 | `MAX_EVOLVE_ITER` | Evolution loop limit |
 
 

@@ -44,8 +44,6 @@ _test_env = {
     "MAX_RETRIES": "3",
     "MAX_PARALLEL_AGENTS": "4",
     "MAX_BASH_TIME": "300",
-    "WALL_LIMIT_PER_RANK": "60,120,240,300,360,600",
-    "ITER_LIMIT_PER_RANK": "10,20,30,30,50,50",
     "TOTAL_WALL_PER_RANK": "1800,1800,1800,1800,1800,1800",
     "MAX_EVOLVE_ITER": "20",
     "CAM_DIR": os.path.join(_test_tmpdir, "Cam"),

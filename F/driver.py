@@ -53,17 +53,12 @@ MAX_CONTEXT = int(os.environ.get("MAX_CONTEXT", "80"))
 MAX_DEPTH = int(os.environ.get("MAX_DEPTH", "5"))
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL_AGENTS", "4"))
 MAX_BASH_TIME = int(os.environ.get("MAX_BASH_TIME", "300"))  # max seconds per bash call
-WALL_LIMIT_PER_RANK = os.environ.get("WALL_LIMIT_PER_RANK", "60,120,240,300,360,600")
-# Per-rank LLM-only wall limit in seconds (excludes bash/tool time).
-_wall_limits = [int(x) for x in WALL_LIMIT_PER_RANK.split(",")]
-
-# Per-rank iteration caps. Lower ranks get fewer iterations — a rank-0 task
-# needing 50 iterations is misranked. Review can escalate rank to get more.
-ITER_LIMIT_PER_RANK = os.environ.get("ITER_LIMIT_PER_RANK", "10,20,30,40,50,50")
-_iter_limits = [int(x) for x in ITER_LIMIT_PER_RANK.split(",")]
 
 # Per-rank TOTAL wall limit (including bash/tool time). 0 = disabled.
-# Safety net only — LLM and bash are already capped separately.
+# Safety net only — bash is already capped separately. Rank is otherwise
+# purely a hint to Pam for model selection; iteration count is bounded
+# globally by MAX_ITER, and LLM-only wall (if any) comes from per-task
+# Timeout/ThinkTime metadata, not from a rank-default table.
 TOTAL_WALL_PER_RANK = os.environ.get("TOTAL_WALL_PER_RANK", "300,600,1200,1800,3600,3600")
 _total_wall_limits = [int(x) for x in TOTAL_WALL_PER_RANK.split(",")]
 # Context caps (chars). Full content always available via tools.
@@ -71,6 +66,24 @@ CAP_MEMORY = int(os.environ.get("CAP_MEMORY", "4000"))
 CAP_GLOBAL = int(os.environ.get("CAP_GLOBAL", "1000"))
 CAP_TASK = int(os.environ.get("CAP_TASK", "4000"))
 CAP_TASKGROUP = int(os.environ.get("CAP_TASKGROUP", "3000"))
+
+# Tool-result truncation cap (chars). Head + last 5 lines are kept.
+TOOL_RESULT_CAP = int(os.environ.get("TOOL_RESULT_CAP", "10000"))
+
+# Robustness thresholds. ERROR_LIMIT/NUDGE_LIMIT trigger session blacklist for
+# the worker model when a model is fundamentally broken (wrong creds, malformed
+# id, gateway misroute) vs. having a transient hiccup. Raise to be more tolerant
+# of upstream flake; lower for tighter detection. MAX_RECOVERY caps the number
+# of delay/retry rounds after LOOP_EXHAUSTED to prevent infinite recursion.
+ERROR_LIMIT = int(os.environ.get("ERROR_LIMIT", "5"))
+NUDGE_LIMIT = int(os.environ.get("NUDGE_LIMIT", "5"))
+MAX_RECOVERY = int(os.environ.get("MAX_RECOVERY", "3"))
+
+# Done-case review iteration floor when the Expect block references verification
+# artifacts (verify/test/pass/contain/log/compile/build/output keywords). The
+# review burns iterations re-running build/test commands; this floor keeps it
+# from prematurely dropping to the no-tool fallback.
+MAX_REVIEW_ITER_VERIFY = int(os.environ.get("MAX_REVIEW_ITER_VERIFY", "30"))
 DRIVER_PATH = os.path.abspath(__file__)
 DRIVER_DIR = os.path.dirname(DRIVER_PATH)
 SKILLS_DIR = os.environ.get("SKILLS_DIR", os.path.join(DRIVER_DIR, "skills"))
@@ -265,24 +278,6 @@ pam = Pam(
 
 _usage = {}      # model -> call count (per run)
 _usage_lock = threading.Lock()
-
-
-def _wall_limit_for_rank(rank):
-    """Get LLM-only wall limit (seconds) for a task rank. 0 = no limit."""
-    if rank < 0:
-        return 0
-    if rank < len(_wall_limits):
-        return _wall_limits[rank]
-    return _wall_limits[-1] if _wall_limits else 0
-
-
-def _iter_limit_for_rank(rank):
-    """Get max iterations for a task rank. Falls back to MAX_ITER."""
-    if rank < 0:
-        return MAX_ITER
-    if rank < len(_iter_limits):
-        return _iter_limits[rank]
-    return _iter_limits[-1] if _iter_limits else MAX_ITER
 
 
 def _total_wall_for_rank(rank):
@@ -1359,8 +1354,10 @@ def _checkpoint_msg(task_content, memory, iteration, max_iter, wall_used=None, w
 # TOOL DISPATCH
 # ============================================================
 
-def _truncate(content, limit=10000):
+def _truncate(content, limit=None):
     """Truncate keeping head + last few lines so agents see errors and final result."""
+    if limit is None:
+        limit = TOOL_RESULT_CAP
     if len(content) <= limit:
         return content
     # Keep as much head as possible, append last 5 lines for final status.
@@ -1827,7 +1824,7 @@ def review_sam(task_dir, node, scheduler, case, expect_section="",
                 low = expect_section.lower()
                 if any(k in low for k in ("verify", "test", "pass",
                         "contain", "log", "compile", "build", "output")):
-                    iter_cap = max(MAX_REVIEW_ITER, 30)
+                    iter_cap = max(MAX_REVIEW_ITER, MAX_REVIEW_ITER_VERIFY)
             # Capture primary's message history so a lateral reviewer (Fix D)
             # can inherit raw observations if the primary fails to commit.
             primary_messages = []
@@ -1977,7 +1974,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         if think_time is not None:
             wall_limit = None if think_time == -1 else think_time
         else:
-            wall_limit = plan.get("wall_limit") or _wall_limit_for_rank(plan["rank"]) or None
+            wall_limit = plan.get("wall_limit") or None
 
     # Per-task bash time: -1 = no limit, else cap
     node.bash_time = plan.get("bash_time", MAX_BASH_TIME)
@@ -2079,8 +2076,8 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             f"and act on them — do not repeat the same mistakes.\n\n"
             f"{feedback[:CAP_MEMORY]}")
 
-    # Per-rank iteration and total wall limits (escalate with rank)
-    max_iter = min(_iter_limit_for_rank(plan["rank"]), MAX_ITER)
+    # Iteration cap is global (rank no longer scales it); per-rank total wall stays.
+    max_iter = MAX_ITER
     total_wall = _total_wall_for_rank(plan["rank"])
 
     # BashTime: -1 means the user explicitly opts in to long bash calls.
@@ -2221,9 +2218,9 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             _history(task_dir, "API_ERROR", depth,
                 error=str(e)[:200], consecutive=consecutive_errors)
             print(f"{prefix}  [error] API: {str(e)[:100]}", flush=True)
-            if consecutive_errors >= 5:
+            if consecutive_errors >= ERROR_LIMIT:
                 _history(task_dir, "ERROR_LIMIT", depth,
-                    reason="5 consecutive API errors")
+                    reason=f"{ERROR_LIMIT} consecutive API errors")
                 print(f"{prefix}[error limit] model has persistent API failures",
                       flush=True)
                 pam.blacklist_model(model)
@@ -2251,7 +2248,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
                     f"(invalid name: {bad_names[0][:40]}). Use only the provided "
                     "tools. Try again."})
                 consecutive_nudges += 1
-                if consecutive_nudges >= 5:
+                if consecutive_nudges >= NUDGE_LIMIT:
                     _history(task_dir, "NUDGE_LIMIT", depth,
                         reason="model emits malformed tool calls")
                     print(f"{prefix}[nudge limit] model emits malformed tool calls",
@@ -2267,9 +2264,9 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             consecutive_nudges += 1
             _history(task_dir, "NUDGE", depth, consecutive=consecutive_nudges)
             print(f"{prefix}[agent] {(msg.content or '')[:200]}", flush=True)
-            if consecutive_nudges >= 5:
+            if consecutive_nudges >= NUDGE_LIMIT:
                 _history(task_dir, "NUDGE_LIMIT", depth,
-                    reason="model cannot use tools after 5 consecutive nudges")
+                    reason=f"model cannot use tools after {NUDGE_LIMIT} consecutive nudges")
                 print(f"{prefix}[nudge limit] model appears unable to use tools",
                       flush=True)
                 pam.blacklist_model(model)
@@ -2394,7 +2391,8 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
     rv = review_sam(task_dir, node, scheduler, "failed", depth=depth,
                     control_model=control_model)
 
-    MAX_RECOVERY = 3  # prevent infinite delay/retry recursion
+    # MAX_RECOVERY (env-tunable, default 3): cap on delay/retry rounds after
+    # LOOP_EXHAUSTED to prevent infinite recursion. See module-level definition.
     recovery_count = getattr(node, '_recovery_count', 0)
 
     if rv.get("action") == "delay" and recovery_count < MAX_RECOVERY:
@@ -2584,8 +2582,7 @@ def final_review(task_dir, task_file, result, elapsed, iterations, final_rank, f
 
     # Per-task system stats: what limits applied + what actually happened.
     # Gives final_review factual context to write sharp System suggestions.
-    max_iter_limit = min(_iter_limit_for_rank(final_rank), MAX_ITER)
-    llm_wall_limit = _wall_limit_for_rank(final_rank)
+    max_iter_limit = MAX_ITER
     total_wall_limit = _total_wall_for_rank(final_rank)
     history_raw = ""
     hf = os.path.join(task_dir, ".history.md")
@@ -2612,7 +2609,6 @@ def final_review(task_dir, task_file, result, elapsed, iterations, final_rank, f
         f"- Model: {final_model} (rank {final_rank})\n\n"
         f"## System context (this task's actual run)\n"
         f"- Limits applied: max_iter={max_iter_limit}, "
-        f"LLM_wall={llm_wall_limit or 'none'}s, "
         f"total_wall={total_wall_limit or 'none'}s\n"
         f"- Used: {iterations} iters, total elapsed {elapsed:.0f}s\n"
         f"- Recovery events: retries={n_retry}, model_changes={n_model_change}, "
