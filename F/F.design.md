@@ -814,6 +814,66 @@ to background jobs to prevent stdin inheritance breaking the
   on the same suite, ~3.5× faster wall time.
 - Confirms the lean stack as production-ready for routine tasks.
 
+### Three key metrics (monitor + control)
+
+For every benchmark run, focus on these three:
+
+| Metric | Computation | What it tells you |
+|--------|-------------|-------------------|
+| **pass rate** | `n_PASS / n_runs` | Did the task complete? |
+| **N_iter** (per PASS) | `count(ITERATION events)` | How efficient at fixed pass rate. |
+| **bash%** | `bash_wall / cam_wall` | Real work vs. LLM talking. High = good. |
+
+Optimize in priority order: **pass rate, N_iter, bash%**. `tools/bench/`
+reports all three per-run and aggregated.
+
+### Bench harness (`tools/bench/`)
+
+Two Python files plus JSON plans:
+
+- `bench.py` — orchestrator: gateway probe → for each batch (state op → run dispatch → cam-log attribution → optional pin) → JSON report
+- `attribute.py` — proximity-greedy cam-log → meta pairing + time breakdown
+
+Plan top-level fields:
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `name` | required | report-file prefix |
+| `state_paths` | `["F/mnt"]` | what counts as "state" for fresh/pin/restore |
+| `lock_model` | none | rewrite `Pam/gateway.rank.yaml` to enable only this model. Backup at `<file>.bench-backup-<ts>`; restored on completion (or in `finally` on Ctrl-C). |
+| `total_wall_s` | none | override `ENV.sh:TOTAL_WALL_PER_RANK` uniformly. Backup + restore as above. |
+| `gateway_probe` | thresholds | abort thresholds for the pre-bench probe |
+| `batches` | required | sequence of batches |
+
+Each batch: `name`, `task`, `n` (default 1), `parallel` (default 1, with
+3 s stagger between launches), `state` (`fresh` / `inherit` / `<pin_name>`),
+optional `pin: <name>` (snapshot state after batch via `cp -al`).
+
+Run with: `tools/bench/bench.py <plan>.json [--skip-probe]`
+
+**Why post-hoc cam-log attribution:** `cam.py` names logs with 1-second
+precision (`driver_<task>_<YYYYMMDDHHMMSS>.jsonl`). With parallel runs
+finishing out of order, claiming logs in real time races with siblings
+still writing. `attribute.py` defers attribution to end-of-batch and pairs
+greedily by proximity (cam_ts ∈ [launch − 2 s, launch + 30 s]) using each
+meta's `launch_ts_local_s` — race-free, robust to gaps.
+
+**`bash%` derivation:**
+```
+bash_wall = Σ (TOOL_RESULT.ts − TOOL_CALL.ts) where tool=bash
+llm_wall  = Σ (api_request.ts − prev_event.ts)
+bash%     = bash_wall / cam_wall
+```
+gemma4 on `fw_complete1` runs at ~5% bash, ~90% llm — the pipeline is
+bounded by LLM throughput (~17 completion-tok/s on Ollama Cloud's 31B),
+not by bash work. Levers to raise `bash%`: chain shell ops in fewer tool
+calls; pre-warm `/mnt/sci_envs/`; faster model for routine ops.
+
+**State model.** Snapshots use `cp -al` hardlink clones — relies on the
+common_env contract that agents only ADD files to `/mnt/sci_envs/<env>/`,
+never modify in place. For tasks that mutate `/mnt`, a deep-copy mode
+would be needed.
+
 ### Ollama Cloud — keep_alive and cooldown (non-default LiteLLM settings)
 
 Two non-default LiteLLM settings on the Ollama Cloud path materially affect

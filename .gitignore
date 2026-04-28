@@ -42,6 +42,13 @@ F/home/*
 **/*.deleted-*
 **/.deleted-*
 
+# bench tooling runtime artifacts (tools/bench/bench.py creates these)
+tools/bench/runs/
+tools/bench/states/
+tools/bench/reports/
+# lock_model / set_total_wall save originals here when mutating Pam/ENV
+**/*.bench-backup-*
+
 # Cam audit data (jsonl)
 Cam/**/*.jsonl
 
