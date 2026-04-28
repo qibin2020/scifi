@@ -33,7 +33,14 @@
 F/tasks/
 F/run/
 F/mnt/*
+!F/mnt/.gitkeep
+!F/mnt/sci_shared/
 F/home/*
+
+# Move-aside cleanups (rename-with-suffix instead of delete)
+**/*.deleted
+**/*.deleted-*
+**/.deleted-*
 
 # Cam audit data (jsonl)
 Cam/**/*.jsonl

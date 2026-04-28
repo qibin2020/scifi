@@ -814,6 +814,28 @@ to background jobs to prevent stdin inheritance breaking the
   on the same suite, ~3.5× faster wall time.
 - Confirms the lean stack as production-ready for routine tasks.
 
+### Ollama Cloud — keep_alive and cooldown (non-default LiteLLM settings)
+
+Two non-default LiteLLM settings on the Ollama Cloud path materially affect
+end-to-end latency. See `/home/u0/Work/sci-fi-RD/gateway_overhead_study.md`
+for the measurements.
+
+1. **`keep_alive: "30m"`** per Ollama deployment in `Pam/gateway.model.yaml`.
+   Without it, the model is GPU-evicted during idle gaps and the next call
+   eats a 60–280 s cold reload. With it, steady-state decode median stays at
+   3–5 s. `keep_alive` is enforced per-key, so each indexed deployment
+   (`OLLAMA_API_KEY`, `OLLAMA_API_KEY1`, …) needs the directive.
+
+2. **Tuned `router_settings`.** Ollama Cloud rate-limits by *concurrency*,
+   not RPM — its 429 returns when the deployment is healthy and the slot
+   frees in milliseconds, not seconds. The LiteLLM defaults
+   (`allowed_fails: 2 / cooldown_time: 30`) misinterpret those 429s as
+   deployment failure and bench a healthy peer for 30 s of wall time, after
+   which `num_retries` cannot rescue and the client sees 5xx. Use
+   `routing_strategy: least-busy`, `num_retries: 5`, `retry_after: 1`,
+   `allowed_fails: 5`, `cooldown_time: 5` instead — short circuit-breaker,
+   retry rolls forward across deployments.
+
 ---
 
 ## 13. Task Metadata

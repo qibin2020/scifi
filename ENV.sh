@@ -120,18 +120,29 @@ export SCIFI_MODEL=ui
 export DEFAULT_ENV_SKILL=temp_env
 
 ## Driver — limits
+##
+## System-level limits are intentionally minimal:
+##   - MAX_ITERATIONS: per-SAM inner-loop iteration cap
+##   - MAX_RETRIES   : SAM retry budget — # of RALPH attempts before giveup
+##   - MAX_BASH_TIME : per-bash-call timeout (only applies when task BashTime != -1)
+##   - TOTAL_WALL_PER_RANK: hard clock safety cap (mainly for testing; real
+##     workloads can extend this freely)
+##
+## Per-rank LLM-wall and per-rank iter caps are deliberately NOT set here —
+## driver.py uses sensible defaults. Override only if you have a measured reason.
+##
 export MAX_ITERATIONS=50
 export CHECKPOINT_EVERY=5
 export MAX_CONTEXT=80
 export MAX_DEPTH=5
 export MAX_REVIEW_ITER=100
 export MAX_REFLECT_ITER=15
-export MAX_RETRIES=3
+export MAX_RETRIES=5
 export MAX_PARALLEL_AGENTS=4
 export MAX_BASH_TIME=300
-export WALL_LIMIT_PER_RANK=600,1200,2400,3000,3600,6000
-export ITER_LIMIT_PER_RANK=100,200,300,300,500,500
-export TOTAL_WALL_PER_RANK=1800,1800,1800,1800,1800,1800
+# export WALL_LIMIT_PER_RANK=...   # use driver default
+# export ITER_LIMIT_PER_RANK=...   # use driver default
+export TOTAL_WALL_PER_RANK=3600,3600,3600,3600,3600,3600   # 1 hr uniform safety cap
 
 ## Evolution
 export MAX_EVOLVE_ITER=20

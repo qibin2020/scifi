@@ -3,6 +3,9 @@
 # rank 0-4 = tool-capable tiers, rank -2 = reasoning-only
 # budget: max API calls per run (-1 = unlimited)
 # thinkable: if true, driver can enable chain-of-thought reasoning
+#
+# Currently focused on gemma4 only — other models commented out. Re-enable any
+# of them in tandem with the corresponding entry in gateway.model.yaml.
 
 models:
   # rank 3: top-tier premium
@@ -18,10 +21,10 @@ models:
     name: gemma4
     budget: -1
     thinkable: false   # 31b dense, Ollama Cloud, 42/42 sci bench validated
-  - rank: 2
-    name: qwen3-coder
-    budget: -1
-    thinkable: false   # 480b MoE, Ollama Cloud
+  # - rank: 2
+  #   name: qwen3-coder
+  #   budget: -1
+  #   thinkable: false   # 480b MoE, Ollama Cloud
   # - rank: 2
   #   name: claude-haiku
   #   budget: 0
@@ -30,23 +33,23 @@ models:
   #   max_tokens: 8192
 
   # rank 0: backup — reliable but slow
-  - rank: 0
-    name: deepseek-v3
-    budget: -1
-    thinkable: false   # v3.2 via Ollama Cloud
-  - rank: 0
-    name: kimi-k2
-    budget: -1
-    thinkable: false   # 1T MoE, Ollama Cloud
-  - rank: 0
-    name: qwen3-next-80b
-    budget: -1
-    thinkable: false   # 80b MoE, Ollama Cloud
+  # - rank: 0
+  #   name: deepseek-v3
+  #   budget: -1
+  #   thinkable: false   # v3.2 via Ollama Cloud
+  # - rank: 0
+  #   name: kimi-k2
+  #   budget: -1
+  #   thinkable: false   # 1T MoE, Ollama Cloud
+  # - rank: 0
+  #   name: qwen3-next-80b
+  #   budget: -1
+  #   thinkable: false   # 80b MoE, Ollama Cloud
 
   # rank -1: can't use tools, fallback only
-  - rank: -1
-    name: gpt-oss
-    budget: -1
-    thinkable: false
+  # - rank: -1
+  #   name: gpt-oss
+  #   budget: -1
+  #   thinkable: false
 
 connection_max: 10

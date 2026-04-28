@@ -1,5 +1,5 @@
 model_list:
-  # ── claude-haiku (Bedrock + Anthropic) ──
+  # ── claude-haiku (Bedrock + Anthropic) — disabled, kept for reference ──
   # - model_name: claude-haiku
   #   litellm_params:
   #     model: bedrock/converse/us.anthropic.claude-haiku-4-5-20251001-v1:0
@@ -14,7 +14,7 @@ model_list:
   #   model_info:
   #     priority: 1
 
-  # ── claude-opus (Bedrock + Anthropic) ──
+  # ── claude-opus (Bedrock + Anthropic) — disabled, kept for reference ──
   # - model_name: claude-opus
   #   litellm_params:
   #     model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
@@ -29,128 +29,147 @@ model_list:
   #   model_info:
   #     priority: 1
 
-  # ── gemma4 (Ollama Cloud) ──
+  # ── gemma4 (Ollama Cloud) — current primary work + control model ──
+  # keep_alive=30m: prevents the 60–280 s cold-reload Ollama Cloud incurs when
+  # the model is GPU-evicted between idle gaps. See
+  # /home/u0/Work/sci-fi-RD/gateway_overhead_study.md §7a.
+  #
+  # For 2-key load balancing (raises the concurrency ceiling, see study §4),
+  # add a second deployment under the same model_name using OLLAMA_API_KEY1
+  # (or any indexed variant — Pam/gateway.sh forwards them automatically).
+  # Not committed: keys are user-specific and the second deployment only
+  # makes sense when both keys are populated in .secret.sh.
   - model_name: gemma4
     litellm_params:
       model: openai/gemma4:31b-cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      keep_alive: "30m"
 
-  # ── qwen3-coder (Ollama Cloud) ──
-  - model_name: qwen3-coder
-    litellm_params:
-      model: openai/qwen3-coder:480b-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
+  # ── Other Ollama Cloud models — disabled while gemma4 is the focus ──
+  # Re-enable + add keep_alive: "30m" + a second deployment per model when needed.
+  # - model_name: qwen3-coder
+  #   litellm_params:
+  #     model: openai/qwen3-coder:480b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  # - model_name: deepseek-v3
+  #   litellm_params:
+  #     model: openai/deepseek-v3.2:cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  # - model_name: kimi-k2
+  #   litellm_params:
+  #     model: openai/kimi-k2:1t-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  # - model_name: qwen3-next-80b
+  #   litellm_params:
+  #     model: openai/qwen3-next:80b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  # - model_name: gpt-oss
+  #   litellm_params:
+  #     model: openai/gpt-oss:120b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
 
-  # ── deepseek-v3 (Ollama Cloud via v3.2) ──
-  - model_name: deepseek-v3
-    litellm_params:
-      model: openai/deepseek-v3.2:cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-
-  # ── kimi-k2 (Ollama Cloud) ──
-  - model_name: kimi-k2
-    litellm_params:
-      model: openai/kimi-k2:1t-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-
-  # ── qwen3-next-80b (Ollama Cloud) ──
-  - model_name: qwen3-next-80b
-    litellm_params:
-      model: openai/qwen3-next:80b-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-
-  # ── gpt-oss (Ollama Cloud) ──
-  - model_name: gpt-oss
-    litellm_params:
-      model: openai/gpt-oss:120b-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-
-  # ── fallback (tool-capable models, rank 0+) ──
+  # ── fallback (alias) — collapsed to gemma4 only while other models are off ──
   - model_name: fallback
     litellm_params:
       model: openai/gemma4:31b-cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      keep_alive: "30m"
     model_info:
       priority: 0
-  - model_name: fallback
-    litellm_params:
-      model: openai/qwen3-coder:480b-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      priority: 1
-  - model_name: fallback
-    litellm_params:
-      model: openai/deepseek-v3.2:cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      priority: 1
-  - model_name: fallback
-    litellm_params:
-      model: openai/kimi-k2:1t-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      priority: 1
-  - model_name: fallback
-    litellm_params:
-      model: openai/qwen3-next:80b-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      priority: 1
+  # - model_name: fallback
+  #   litellm_params:
+  #     model: openai/qwen3-coder:480b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: fallback
+  #   litellm_params:
+  #     model: openai/deepseek-v3.2:cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: fallback
+  #   litellm_params:
+  #     model: openai/kimi-k2:1t-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: fallback
+  #   litellm_params:
+  #     model: openai/qwen3-next:80b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
 
-  # ── ui (all models, for SciFi interface) ──
+  # ── ui (alias for SciFi) — collapsed to gemma4 only ──
   - model_name: ui
     litellm_params:
       model: openai/gemma4:31b-cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      keep_alive: "30m"
     model_info:
       priority: 0
-  - model_name: ui
-    litellm_params:
-      model: openai/qwen3-coder:480b-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      priority: 1
-  - model_name: ui
-    litellm_params:
-      model: openai/deepseek-v3.2:cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      priority: 1
-  - model_name: ui
-    litellm_params:
-      model: openai/kimi-k2:1t-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      priority: 1
-  - model_name: ui
-    litellm_params:
-      model: openai/qwen3-next:80b-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      priority: 1
-  - model_name: ui
-    litellm_params:
-      model: openai/gpt-oss:120b-cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      priority: 1
+  # - model_name: ui
+  #   litellm_params:
+  #     model: openai/qwen3-coder:480b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: ui
+  #   litellm_params:
+  #     model: openai/deepseek-v3.2:cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: ui
+  #   litellm_params:
+  #     model: openai/kimi-k2:1t-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: ui
+  #   litellm_params:
+  #     model: openai/qwen3-next:80b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: ui
+  #   litellm_params:
+  #     model: openai/gpt-oss:120b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Provider examples — one model per provider, showing the call format.
@@ -225,6 +244,18 @@ general_settings:
   health_check_interval: 300
 
 router_settings:
+  # Tuned per /home/u0/Work/sci-fi-RD/gateway_overhead_study.md §8.
+  # Ollama Cloud rate-limits by *concurrency*, not RPM — its 429 returns when
+  # the deployment is healthy and the slot frees in milliseconds, not 30 s.
+  # The LiteLLM defaults (allowed_fails: 2 / cooldown_time: 30) misinterpret
+  # those 429s as deployment failure and bench a healthy peer for 30 s of
+  # wall-clock time, then num_retries cannot rescue and the client sees 5xx.
+  # Goal: minimize LLM time in total wall — short cooldown, retry rolls forward.
+  routing_strategy: least-busy   # route to fewest-in-flight deployment (no Redis); harmless with 1 deployment, helpful with N
+  num_retries: 5                 # cross-deployment retry budget — silently absorbs concurrency bursts
+  retry_after: 1                 # Ollama concurrency-429 slot clears in ms
+  allowed_fails: 5               # only cooldown after 5 *consecutive* fails — real outage signal, not a transient burst
+  cooldown_time: 5               # short circuit-breaker, not a wall-clock penalty
   enable_pre_call_checks: true
   retry_policy:
     RateLimitError: 2
@@ -232,6 +263,3 @@ router_settings:
 
 litellm_settings:
   modify_params: true
-  num_retries: 1
-  cooldown_time: 300
-  allowed_fails: 1

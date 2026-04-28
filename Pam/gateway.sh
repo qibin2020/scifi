@@ -27,16 +27,19 @@ case "$ACTION" in
             exit 1
         fi
         ENV_FLAGS=()
-        # AWS_REGION is forwarded so litellm's boto3 Bedrock client targets the
-        # right region. us-east-2 is the only region with Anthropic use-case
-        # approval on this account for opus/sonnet — without this, boto3
-        # defaults to us-east-1 (unapproved) and returns the misleading
+        # Forward the LiteLLM master key, every *_API_KEY (bare like OLLAMA_API_KEY
+        # or indexed like OLLAMA_API_KEY1 / BEDROCK_API_KEY_2 for multi-deployment
+        # load-balancing), AZURE_API_BASE, and AWS_(DEFAULT_)?REGION.
+        # AWS_REGION pinning matters because Anthropic use-case approval on Bedrock
+        # is region-scoped (us-east-2 only on this account for opus/sonnet) — without
+        # it, boto3 defaults to us-east-1 (unapproved) and returns the misleading
         # "use case form not submitted" control-plane error.
-        for _ev in LITELLM_MASTER_KEY ANTHROPIC_API_KEY BEDROCK_API_KEY OLLAMA_API_KEY OPENAI_API_KEY GEMINI_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY GROQ_API_KEY TOGETHERAI_API_KEY FIREWORKS_AI_API_KEY AZURE_API_KEY AZURE_API_BASE AWS_REGION AWS_DEFAULT_REGION; do
+        while IFS= read -r _ev; do
+            [ -z "$_ev" ] && continue
             if [ -n "${!_ev:-}" ]; then
                 ENV_FLAGS+=(--env "$_ev=${!_ev}")
             fi
-        done
+        done < <(compgen -e | grep -E '^(LITELLM_MASTER_KEY|(OLLAMA|BEDROCK|ANTHROPIC|OPENAI|GEMINI|MISTRAL|DEEPSEEK|OPENROUTER|GROQ|TOGETHERAI|FIREWORKS_AI|AZURE)_API_KEY[_0-9]*|AZURE_API_BASE|AWS_(DEFAULT_)?REGION)$' || true)
 
         $APPTAINER instance start \
                 "${ENV_FLAGS[@]}" \
