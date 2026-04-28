@@ -1,0 +1,451 @@
+{
+  "plan": "fw_full_10x",
+  "ts_utc": "20260428T032320Z",
+  "state_paths": [
+    "F/mnt"
+  ],
+  "gateway_probe": {
+    "skipped": true
+  },
+  "inter_probes": [
+    {
+      "ts_utc": "20260428T011636Z",
+      "tps_decode": 47.4,
+      "oh_p50_ms": 1.3,
+      "after_batch": "bootstrap"
+    },
+    {
+      "ts_utc": "20260428T021736Z",
+      "tps_decode": 44.8,
+      "oh_p50_ms": 1.2,
+      "after_batch": "c1_warm"
+    },
+    {
+      "ts_utc": "20260428T024736Z",
+      "tps_decode": 44.1,
+      "oh_p50_ms": 1.3,
+      "after_batch": "c2_warm"
+    },
+    {
+      "ts_utc": "20260428T032320Z",
+      "tps_decode": 31.2,
+      "oh_p50_ms": 1.6,
+      "after_batch": "c3_warm"
+    }
+  ],
+  "batches": [
+    {
+      "name": "bootstrap",
+      "task": "sci_study/fw_bootstrap",
+      "n": 1,
+      "parallel": 1,
+      "state": "fresh",
+      "pin": "warm",
+      "n_runs": 1,
+      "n_pass": 1,
+      "n_fail": 0,
+      "n_err": 0,
+      "pass_rate": 1.0,
+      "iters_p50": 20,
+      "wall_p50": 373,
+      "bash_pct_p50": 0.046,
+      "runs": [
+        {
+          "idx": 1,
+          "verdict": "PASS",
+          "iters": 20,
+          "wall_s": 373,
+          "bash_s": 17,
+          "llm_s": 354,
+          "other_s": 0,
+          "n_bash": 16,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "name": "c1_warm",
+      "task": "sci_study/fw_complete1",
+      "n": 10,
+      "parallel": 4,
+      "state": "warm",
+      "pin": null,
+      "n_runs": 10,
+      "n_pass": 5,
+      "n_fail": 1,
+      "n_err": 4,
+      "pass_rate": 0.5,
+      "iters_p50": 78,
+      "wall_p50": 918,
+      "bash_pct_p50": 0.064,
+      "runs": [
+        {
+          "idx": 1,
+          "verdict": "UNKNOWN",
+          "iters": 88,
+          "wall_s": 1393,
+          "bash_s": 91,
+          "llm_s": 1300,
+          "other_s": 0,
+          "n_bash": 62,
+          "exit_code": 0
+        },
+        {
+          "idx": 2,
+          "verdict": "UNKNOWN",
+          "iters": 97,
+          "wall_s": 1350,
+          "bash_s": 69,
+          "llm_s": 1279,
+          "other_s": 0,
+          "n_bash": 64,
+          "exit_code": 0
+        },
+        {
+          "idx": 3,
+          "verdict": "PASS",
+          "iters": 61,
+          "wall_s": 601,
+          "bash_s": 30,
+          "llm_s": 569,
+          "other_s": 0,
+          "n_bash": 37,
+          "exit_code": 0
+        },
+        {
+          "idx": 4,
+          "verdict": "UNKNOWN",
+          "iters": 92,
+          "wall_s": 1363,
+          "bash_s": 88,
+          "llm_s": 1272,
+          "other_s": 1,
+          "n_bash": 55,
+          "exit_code": 0
+        },
+        {
+          "idx": 5,
+          "verdict": "PASS",
+          "iters": 88,
+          "wall_s": 1307,
+          "bash_s": 53,
+          "llm_s": 1252,
+          "other_s": 0,
+          "n_bash": 64,
+          "exit_code": 0
+        },
+        {
+          "idx": 6,
+          "verdict": "PASS",
+          "iters": 66,
+          "wall_s": 843,
+          "bash_s": 59,
+          "llm_s": 781,
+          "other_s": 0,
+          "n_bash": 39,
+          "exit_code": 0
+        },
+        {
+          "idx": 7,
+          "verdict": "PASS",
+          "iters": 78,
+          "wall_s": 918,
+          "bash_s": 71,
+          "llm_s": 845,
+          "other_s": 0,
+          "n_bash": 64,
+          "exit_code": 0
+        },
+        {
+          "idx": 8,
+          "verdict": "PASS",
+          "iters": 97,
+          "wall_s": 1338,
+          "bash_s": 86,
+          "llm_s": 1250,
+          "other_s": 0,
+          "n_bash": 67,
+          "exit_code": 0
+        },
+        {
+          "idx": 9,
+          "verdict": "UNKNOWN",
+          "iters": 94,
+          "wall_s": 1450,
+          "bash_s": 127,
+          "llm_s": 1321,
+          "other_s": 0,
+          "n_bash": 61,
+          "exit_code": 0
+        },
+        {
+          "idx": 10,
+          "verdict": "FAIL",
+          "iters": 103,
+          "wall_s": 1432,
+          "bash_s": 149,
+          "llm_s": 1280,
+          "other_s": 0,
+          "n_bash": 73,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "name": "c2_warm",
+      "task": "sci_study/fw_complete2",
+      "n": 10,
+      "parallel": 4,
+      "state": "warm",
+      "pin": null,
+      "n_runs": 10,
+      "n_pass": 9,
+      "n_fail": 0,
+      "n_err": 1,
+      "pass_rate": 0.9,
+      "iters_p50": 34,
+      "wall_p50": 354,
+      "bash_pct_p50": 0.099,
+      "runs": [
+        {
+          "idx": 1,
+          "verdict": "PASS",
+          "iters": 54,
+          "wall_s": 506,
+          "bash_s": 33,
+          "llm_s": 470,
+          "other_s": 0,
+          "n_bash": 35,
+          "exit_code": 0
+        },
+        {
+          "idx": 2,
+          "verdict": "PASS",
+          "iters": 33,
+          "wall_s": 323,
+          "bash_s": 35,
+          "llm_s": 285,
+          "other_s": 0,
+          "n_bash": 20,
+          "exit_code": 0
+        },
+        {
+          "idx": 3,
+          "verdict": "PASS",
+          "iters": 28,
+          "wall_s": 183,
+          "bash_s": 43,
+          "llm_s": 138,
+          "other_s": 0,
+          "n_bash": 18,
+          "exit_code": 0
+        },
+        {
+          "idx": 4,
+          "verdict": "PASS",
+          "iters": 29,
+          "wall_s": 330,
+          "bash_s": 41,
+          "llm_s": 287,
+          "other_s": 0,
+          "n_bash": 17,
+          "exit_code": 0
+        },
+        {
+          "idx": 5,
+          "verdict": "UNKNOWN",
+          "iters": 141,
+          "wall_s": 1567,
+          "bash_s": 115,
+          "llm_s": 1449,
+          "other_s": 0,
+          "n_bash": 88,
+          "exit_code": 0
+        },
+        {
+          "idx": 6,
+          "verdict": "PASS",
+          "iters": 34,
+          "wall_s": 354,
+          "bash_s": 35,
+          "llm_s": 317,
+          "other_s": 0,
+          "n_bash": 22,
+          "exit_code": 0
+        },
+        {
+          "idx": 7,
+          "verdict": "PASS",
+          "iters": 30,
+          "wall_s": 359,
+          "bash_s": 33,
+          "llm_s": 323,
+          "other_s": 0,
+          "n_bash": 18,
+          "exit_code": 0
+        },
+        {
+          "idx": 8,
+          "verdict": "PASS",
+          "iters": 89,
+          "wall_s": 911,
+          "bash_s": 71,
+          "llm_s": 836,
+          "other_s": 0,
+          "n_bash": 55,
+          "exit_code": 0
+        },
+        {
+          "idx": 9,
+          "verdict": "PASS",
+          "iters": 34,
+          "wall_s": 265,
+          "bash_s": 26,
+          "llm_s": 237,
+          "other_s": 0,
+          "n_bash": 23,
+          "exit_code": 0
+        },
+        {
+          "idx": 10,
+          "verdict": "PASS",
+          "iters": 63,
+          "wall_s": 582,
+          "bash_s": 66,
+          "llm_s": 514,
+          "other_s": 0,
+          "n_bash": 41,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "name": "c3_warm",
+      "task": "sci_study/fw_complete3",
+      "n": 10,
+      "parallel": 4,
+      "state": "warm",
+      "pin": null,
+      "n_runs": 10,
+      "n_pass": 7,
+      "n_fail": 0,
+      "n_err": 3,
+      "pass_rate": 0.7,
+      "iters_p50": 42,
+      "wall_p50": 417,
+      "bash_pct_p50": 0.053,
+      "runs": [
+        {
+          "idx": 1,
+          "verdict": "PASS",
+          "iters": 91,
+          "wall_s": 616,
+          "bash_s": 49,
+          "llm_s": 563,
+          "other_s": 1,
+          "n_bash": 56,
+          "exit_code": 0
+        },
+        {
+          "idx": 2,
+          "verdict": "PASS",
+          "iters": 56,
+          "wall_s": 564,
+          "bash_s": 36,
+          "llm_s": 525,
+          "other_s": 1,
+          "n_bash": 24,
+          "exit_code": 0
+        },
+        {
+          "idx": 3,
+          "verdict": "UNKNOWN",
+          "iters": 92,
+          "wall_s": 1448,
+          "bash_s": 116,
+          "llm_s": 1328,
+          "other_s": 1,
+          "n_bash": 42,
+          "exit_code": 0
+        },
+        {
+          "idx": 4,
+          "verdict": "PASS",
+          "iters": 41,
+          "wall_s": 288,
+          "bash_s": 15,
+          "llm_s": 270,
+          "other_s": 1,
+          "n_bash": 22,
+          "exit_code": 0
+        },
+        {
+          "idx": 5,
+          "verdict": "ERROR",
+          "iters": 69,
+          "wall_s": 948,
+          "bash_s": 51,
+          "llm_s": 894,
+          "other_s": 1,
+          "n_bash": 32,
+          "exit_code": 1
+        },
+        {
+          "idx": 6,
+          "verdict": "PASS",
+          "iters": 42,
+          "wall_s": 366,
+          "bash_s": 23,
+          "llm_s": 340,
+          "other_s": 1,
+          "n_bash": 19,
+          "exit_code": 0
+        },
+        {
+          "idx": 7,
+          "verdict": "PASS",
+          "iters": 87,
+          "wall_s": 1063,
+          "bash_s": 56,
+          "llm_s": 1005,
+          "other_s": 0,
+          "n_bash": 34,
+          "exit_code": 0
+        },
+        {
+          "idx": 8,
+          "verdict": "PASS",
+          "iters": 38,
+          "wall_s": 343,
+          "bash_s": 16,
+          "llm_s": 323,
+          "other_s": 1,
+          "n_bash": 20,
+          "exit_code": 0
+        },
+        {
+          "idx": 9,
+          "verdict": "PASS",
+          "iters": 40,
+          "wall_s": 417,
+          "bash_s": 20,
+          "llm_s": 395,
+          "other_s": 0,
+          "n_bash": 19,
+          "exit_code": 0
+        },
+        {
+          "idx": 10,
+          "verdict": "ERROR",
+          "iters": 90,
+          "wall_s": 823,
+          "bash_s": 59,
+          "llm_s": 737,
+          "other_s": 1,
+          "n_bash": 38,
+          "exit_code": 143
+        }
+      ]
+    }
+  ]
+}

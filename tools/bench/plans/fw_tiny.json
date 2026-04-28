@@ -1,0 +1,15 @@
+{
+  "name": "fw_tiny_8x",
+  "state_paths": ["F/mnt"],
+  "lock_model": "gemma4",
+  "total_wall_s": 7200,
+  "max_retries": 50,
+  "gateway_probe": {
+    "abort_below_tps": 10,
+    "abort_above_oh_ms": 50,
+    "abort_below_conc_ceiling": 1
+  },
+  "batches": [
+    { "name": "tiny_warm", "task": "sci_study/fw_complete3_tiny", "n": 8, "parallel": 4, "state": "warm" }
+  ]
+}

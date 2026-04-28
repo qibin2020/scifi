@@ -1,0 +1,17 @@
+{
+  "name": "fw_full_10x",
+  "state_paths": ["F/mnt"],
+  "lock_model": "gemma4",
+  "total_wall_s": 2700,
+  "gateway_probe": {
+    "abort_below_tps": 10,
+    "abort_above_oh_ms": 50,
+    "abort_below_conc_ceiling": 1
+  },
+  "batches": [
+    { "name": "bootstrap", "task": "sci_study/fw_bootstrap", "n": 1,  "parallel": 1, "state": "fresh", "pin": "warm" },
+    { "name": "c1_warm",   "task": "sci_study/fw_complete1", "n": 10, "parallel": 4, "state": "warm" },
+    { "name": "c2_warm",   "task": "sci_study/fw_complete2", "n": 10, "parallel": 4, "state": "warm" },
+    { "name": "c3_warm",   "task": "sci_study/fw_complete3", "n": 10, "parallel": 4, "state": "warm" }
+  ]
+}

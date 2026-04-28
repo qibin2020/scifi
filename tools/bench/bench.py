@@ -78,12 +78,13 @@ def post_chat(prompt, max_tokens=8, timeout=60):
         "temperature": 0,
     }).encode()
     key = os.environ.get("LITELLM_MASTER_KEY", "")
-    if not key:
-        raise SystemExit("ERROR: LITELLM_MASTER_KEY not set — source ENV.sh first.")
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     req = urlreq.Request(
         f"{gateway_url()}/v1/chat/completions",
         data=payload,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+        headers=headers,
         method="POST",
     )
     t0 = time.time()
@@ -183,6 +184,20 @@ def gateway_probe(plan):
     }
 
 
+def probe_lite(n=5):
+    """Lightweight probe used between batches. TPS-only, no concurrency ramp.
+
+    Returns dict with tps_decode and oh_p50_ms. Cheap enough to run between
+    batches without disturbing the run cadence (~15-30s).
+    """
+    tps, oh, _ = probe_tps(n=n)
+    return {
+        "ts_utc":     utc_compact(),
+        "tps_decode": round(tps, 1),
+        "oh_p50_ms":  round(oh,  1),
+    }
+
+
 # ─── plan-level overrides (lock_model + set_total_wall, with restore) ────
 
 def _backup(path):
@@ -250,11 +265,12 @@ def lock_model(model_name):
     return bak
 
 
-def set_total_wall(seconds):
+def set_total_wall(seconds, existing_backup=None):
     """Override ENV.sh's TOTAL_WALL_PER_RANK to <seconds> uniform across all 6 ranks.
 
-    No-op if the value already matches. Otherwise: backup ENV.sh, rewrite the
-    line. Returns backup path (or None). Verbose: prints before/after.
+    No-op if the value already matches. Otherwise: backup ENV.sh (or reuse
+    `existing_backup`), rewrite the line. Returns backup path (or None).
+    Verbose: prints before/after.
     """
     env_path = os.path.join(BASEDIR, "ENV.sh")
     if not os.path.isfile(env_path):
@@ -272,7 +288,7 @@ def set_total_wall(seconds):
         print(f"[total_wall] already set — no change.")
         return None
 
-    bak = _backup(env_path)
+    bak = existing_backup or _backup(env_path)
     new_content = re.sub(
         r"^(export TOTAL_WALL_PER_RANK=)\S+",
         rf"\g<1>{new_value}",
@@ -281,6 +297,41 @@ def set_total_wall(seconds):
     open(env_path, "w").write(new_content)
     print(f"[total_wall] WROTE: {env_path}  ({old_value} → {new_value})")
     print(f"[total_wall] backup: {os.path.basename(bak)}")
+    return bak
+
+
+def set_max_retries(n, existing_backup=None):
+    """Override ENV.sh's MAX_RETRIES to <n>.
+
+    Same pattern as set_total_wall. If `existing_backup` is given (because
+    another override already backed up ENV.sh), reuse it instead of taking a
+    second backup that would shadow the original.
+    """
+    env_path = os.path.join(BASEDIR, "ENV.sh")
+    if not os.path.isfile(env_path):
+        raise SystemExit(f"ERROR: {env_path} not found")
+    content = open(env_path).read()
+
+    new_value = str(int(n))
+    m = re.search(r"^export MAX_RETRIES=(\S+)", content, re.MULTILINE)
+    if not m:
+        raise SystemExit("ERROR: 'export MAX_RETRIES=...' not found in ENV.sh")
+    old_value = m.group(1)
+    print(f"[max_retries] requested: {n}")
+    print(f"[max_retries] currently in ENV.sh: {old_value}")
+    if old_value == new_value:
+        print(f"[max_retries] already set — no change.")
+        return None  # caller's `env_bak = ... or env_bak` keeps any prior backup
+
+    bak = existing_backup or _backup(env_path)
+    new_content = re.sub(
+        r"^(export MAX_RETRIES=)\S+",
+        rf"\g<1>{new_value}",
+        content, count=1, flags=re.MULTILINE,
+    )
+    open(env_path, "w").write(new_content)
+    print(f"[max_retries] WROTE: {env_path}  ({old_value} → {new_value})")
+    print(f"[max_retries] backup: {os.path.basename(bak)}")
     return bak
 
 
@@ -424,6 +475,12 @@ def validate_plan(plan):
     if "total_wall_s" in plan:
         if not isinstance(plan["total_wall_s"], int) or plan["total_wall_s"] < 60:
             raise SystemExit("'total_wall_s' must be an int >= 60")
+    if "max_retries" in plan:
+        if not isinstance(plan["max_retries"], int) or plan["max_retries"] < 1:
+            raise SystemExit("'max_retries' must be a positive int")
+    # Pins from prior bench runs (cp -al snapshots in STATES_DIR) are also
+    # accepted — lets a plan reuse a warm pin without redoing bootstrap.
+    existing_pins = set(os.listdir(STATES_DIR)) if os.path.isdir(STATES_DIR) else set()
     seen_names = set()
     pins = set()
     for b in plan["batches"]:
@@ -433,7 +490,7 @@ def validate_plan(plan):
             raise SystemExit(f"duplicate batch name: {b['name']}")
         seen_names.add(b["name"])
         s = b.get("state", "inherit")
-        if s not in ("fresh", "inherit") and s not in pins:
+        if s not in ("fresh", "inherit") and s not in pins and s not in existing_pins:
             raise SystemExit(f"batch '{b['name']}': state '{s}' references undefined pin")
         if "pin" in b and b["pin"]:
             pins.add(b["pin"])
@@ -446,6 +503,8 @@ def main():
     ap.add_argument("plan", help="path to JSON plan")
     ap.add_argument("--skip-probe", action="store_true",
                     help="skip the pre-bench gateway probe (use only when gateway is known good)")
+    ap.add_argument("--probe-between", action="store_true",
+                    help="run a lightweight TPS probe after each batch and record the deltas vs initial probe")
     args = ap.parse_args()
 
     plan = json.load(open(args.plan))
@@ -465,10 +524,15 @@ def main():
         b = lock_model(plan["lock_model"])
         if b:
             backups[os.path.join(BASEDIR, "Pam", "gateway.rank.yaml")] = b
+    # ENV.sh may be modified by both total_wall_s and max_retries. Share one
+    # backup so the second override doesn't shadow the first.
+    env_bak = None
     if "total_wall_s" in plan:
-        b = set_total_wall(plan["total_wall_s"])
-        if b:
-            backups[os.path.join(BASEDIR, "ENV.sh")] = b
+        env_bak = set_total_wall(plan["total_wall_s"], env_bak) or env_bak
+    if "max_retries" in plan:
+        env_bak = set_max_retries(plan["max_retries"], env_bak) or env_bak
+    if env_bak:
+        backups[os.path.join(BASEDIR, "ENV.sh")] = env_bak
 
     try:
         # 1. Probe
@@ -485,6 +549,8 @@ def main():
 
         # 2. Batches
         batch_results = []
+        inter_probes  = []  # one entry per batch boundary (post-batch)
+        baseline_tps  = probe.get("tps_decode") if isinstance(probe, dict) else None
         for batch in plan["batches"]:
             prepare_state(plan, batch)
             launch_batch(batch)
@@ -495,6 +561,16 @@ def main():
             if batch.get("pin"):
                 print(f"[state] pinning current state as '{batch['pin']}' (hardlink-clone)")
                 state_pin(plan, batch["pin"])
+            if args.probe_between:
+                print(f"[probe-lite] post-batch '{batch['name']}' TPS sweep …")
+                lp = probe_lite()
+                lp["after_batch"] = batch["name"]
+                if baseline_tps:
+                    lp["delta_tps_pct"] = round(100 * (lp["tps_decode"] - baseline_tps) / baseline_tps, 1)
+                print(f"[probe-lite]   tps={lp['tps_decode']} tok/s   "
+                      f"oh={lp['oh_p50_ms']}ms"
+                      + (f"   Δ={lp.get('delta_tps_pct')}% vs initial" if baseline_tps else ""))
+                inter_probes.append(lp)
     finally:
         if backups:
             print("[restore] reverting plan-level overrides …")
@@ -507,6 +583,7 @@ def main():
         "ts_utc":        ts,
         "state_paths":   plan["state_paths"],
         "gateway_probe": probe,
+        "inter_probes":  inter_probes,
         "batches":       batch_results,
     }
     report_path = os.path.join(REPORTS_DIR, f"{plan['name']}_{ts}.json")
@@ -526,6 +603,13 @@ def main():
         wp  = f"{b['wall_p50']}s"      if b['wall_p50']     is not None else " - "
         bp  = f"{b['bash_pct_p50']:.1%}" if b['bash_pct_p50'] is not None else " - "
         print(f"{b['name']:<20} {b['n_runs']:>3} {pfe:>8} {pr:>9} {ip:>9} {wp:>9} {bp:>9}")
+    if inter_probes:
+        print()
+        print(f"{'after_batch':<20} {'tps':>8} {'oh_ms':>8} {'Δ_tps%':>8}")
+        for lp in inter_probes:
+            d = lp.get("delta_tps_pct")
+            d_str = f"{d:+.1f}" if d is not None else " - "
+            print(f"{lp['after_batch']:<20} {lp['tps_decode']:>8} {lp['oh_p50_ms']:>8} {d_str:>8}")
     print(f"\nreport: {report_path}")
 
     # exit non-zero if any batch had no PASS — useful in CI / loops
