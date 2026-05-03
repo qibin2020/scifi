@@ -121,36 +121,35 @@ export DEFAULT_ENV_SKILL=temp_env
 
 ## Driver — limits
 ##
-## System-level limits are intentionally minimal:
-##   - MAX_ITERATIONS: per-SAM iteration cap (single global cap, no per-rank scaling)
-##   - MAX_RETRIES   : SAM retry budget — # of RALPH attempts before giveup
-##   - MAX_BASH_TIME : per-bash-call timeout (only applies when task BashTime != -1)
-##   - TOTAL_WALL_PER_RANK: per-rank total wall incl. bash — hard clock safety cap
-##     (rank otherwise only hints model selection in Pam; it does not scale iters
-##     or LLM-only wall — those come from MAX_ITERATIONS and per-task Timeout).
+## System-level limits — each agent gets its own iter cap; each retry path its
+## own cap. No global flooring; values apply directly.
+##   - MAX_ITERATIONS_WORK        : worker iter cap per SAM
+##   - MAX_ITERATIONS_REVIEW_DONE : done-case reviewer iter cap
+##   - MAX_ITERATIONS_REVIEW_FAIL : failed-case reviewer iter cap
+##   - MAX_ITERATIONS_REFLECT     : reflect (diagnostic) agent iter cap
+##   - MAX_RETRIES_REJECTED       : done-claim rejection retry cap (within SAM)
+##   - MAX_RETRIES_EXHAUSTED      : LOOP_EXHAUSTED retry cap (spawns new SAMs)
+##   - MAX_BASH_TIME              : per-bash-call timeout (BashTime: -1 disables)
+##   - TOTAL_WALL_PER_RANK        : per-rank wall-clock cap incl. bash
 ##
-export MAX_ITERATIONS=50         # global per-SAM iteration cap
-export CHECKPOINT_EVERY=5        # re-ground every N effective iters (re-inject task + memory)
-export MAX_CONTEXT=80            # max LLM messages kept before trim (first 2 + last N-3)
-export MAX_DEPTH=5               # max subtask nesting depth
-export MAX_REVIEW_ITER=100       # review agent iter limit (verify/triage)
-export MAX_REFLECT_ITER=15       # reflection agent iter limit (after MAX_RETRIES exhausted)
-export MAX_RETRIES=5             # SAM RALPH-retry budget — review rejections before reflect
-export MAX_PARALLEL_AGENTS=4     # concurrent subtask cap (scheduler semaphore)
-export MAX_BASH_TIME=300         # per-bash-call timeout cap (BashTime: -1 in task disables)
-export TOTAL_WALL_PER_RANK=3600,3600,3600,3600,3600,3600   # per-rank total wall incl. bash; 1 hr uniform safety cap
+export MAX_ITERATIONS_WORK=50           # worker iter cap per SAM
+export MAX_ITERATIONS_REVIEW_DONE=50    # done-case reviewer iter cap
+export MAX_ITERATIONS_REVIEW_FAIL=10    # failed-case reviewer iter cap (tighter — no standalone verify)
+export MAX_ITERATIONS_REFLECT=15        # reflect agent iter cap
+export MAX_RETRIES_REJECTED=3           # max done-claim rejections before reflect (within SAM)
+export MAX_RETRIES_EXHAUSTED=3          # max LOOP_EXHAUSTED → retry rounds (each spawns new SAM)
+export CHECKPOINT_EVERY=5               # re-ground every N iters (re-inject task + memory)
+export MAX_CONTEXT=80                   # max LLM messages kept before trim
+export MAX_DEPTH=5                      # max subtask nesting depth
+export MAX_PARALLEL_AGENTS=4            # concurrent subtask cap (scheduler semaphore)
+export MAX_BASH_TIME=300                # per-bash-call timeout cap
+export TOTAL_WALL_PER_RANK=2700,2700,2700,2700,2700,2700   # per-rank total wall incl. bash; 45 min uniform safety cap
 
-## Driver — robustness knobs (all optional; driver.py + portal.py fall back to
-## the defaults shown). ERROR_LIMIT and NUDGE_LIMIT both trigger session-level
-## model blacklist when the threshold is hit; raise to be more tolerant of
-## upstream flake (Ollama Cloud bursts, transient 5xx), lower for tighter
-## detection of fundamentally broken models. MAX_RECOVERY caps delay/retry
-## rounds after LOOP_EXHAUSTED. MAX_REVIEW_ITER_VERIFY and TOOL_RESULT_CAP
-## are budget knobs (no blacklist effect).
+## Driver — robustness knobs (optional; defaults shown apply if unset).
+## ERROR_LIMIT/NUDGE_LIMIT trigger session-level model blacklist; raise to
+## be more tolerant of upstream flake, lower for tighter detection.
 # export ERROR_LIMIT=5             # consecutive API errors → blacklist worker model
 # export NUDGE_LIMIT=5             # consecutive no-tool / malformed-tool turns → blacklist
-# export MAX_RECOVERY=3            # delay/retry rounds after LOOP_EXHAUSTED before giving up
-# export MAX_REVIEW_ITER_VERIFY=30 # iter floor for verify-heavy done-case reviews
 # export TOOL_RESULT_CAP=10000     # chars kept of bash/read_file tool result (head + last 5 lines)
 
 ## Evolution

@@ -454,7 +454,7 @@ Three caps bound any SAM run; whichever fires first wins.
 
 | Cap | Default | Scope | Where |
 |-----|---------|-------|-------|
-| Iteration cap | `MAX_ITERATIONS=50` | Global, all ranks | `ENV.sh` |
+| Iteration cap | `MAX_ITERATIONS_WORK=50` | Global, all ranks | `ENV.sh` |
 | LLM-only wall | (off unless task opts in) | Per-task `Timeout` / `ThinkTime` metadata | `top.md` |
 | Total wall (incl. bash) | `TOTAL_WALL_PER_RANK=3600,...` (uniform 1hr) | Per-rank, includes bash time | `ENV.sh` |
 

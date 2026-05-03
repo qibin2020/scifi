@@ -451,21 +451,22 @@ def build_driver_cmd(task_name, extra_args):
         "GATEWAY_URL": "http://localhost:%s" % _env("GATEWAY_PORT"),
         "FALLBACK_HIGHEST": _env("FALLBACK_HIGHEST"),
         "FALLBACK_WORKING": _env("FALLBACK_WORKING"),
-        "MAX_ITERATIONS": _env("MAX_ITERATIONS"),
+        "MAX_ITERATIONS_WORK":        _env("MAX_ITERATIONS_WORK"),
+        "MAX_ITERATIONS_REVIEW_DONE": _env("MAX_ITERATIONS_REVIEW_DONE"),
+        "MAX_ITERATIONS_REVIEW_FAIL": _env("MAX_ITERATIONS_REVIEW_FAIL"),
+        "MAX_ITERATIONS_REFLECT":     _env("MAX_ITERATIONS_REFLECT"),
+        "MAX_RETRIES_REJECTED":       _env("MAX_RETRIES_REJECTED"),
+        "MAX_RETRIES_EXHAUSTED":      _env("MAX_RETRIES_EXHAUSTED"),
         "CHECKPOINT_EVERY": _env("CHECKPOINT_EVERY"),
         "MAX_CONTEXT": _env("MAX_CONTEXT"),
         "MAX_DEPTH": _env("MAX_DEPTH"),
-        "MAX_REVIEW_ITER": _env("MAX_REVIEW_ITER"),
-        "MAX_REFLECT_ITER": _env("MAX_REFLECT_ITER"),
-        "MAX_RETRIES": _env("MAX_RETRIES"),
         "MAX_PARALLEL_AGENTS": _env("MAX_PARALLEL_AGENTS"),
         "MAX_BASH_TIME": _env("MAX_BASH_TIME"),
         "TOTAL_WALL_PER_RANK": _env("TOTAL_WALL_PER_RANK"),
-        # ERROR_LIMIT, NUDGE_LIMIT, MAX_RECOVERY, MAX_REVIEW_ITER_VERIFY,
-        # TOOL_RESULT_CAP are intentionally not forwarded — they're driver-
-        # internal knobs, commented out in ENV.sh by default; driver.py's
-        # os.environ.get(name, default) handles them. To override, uncomment
-        # in ENV.sh AND add the forward here.
+        # ERROR_LIMIT, NUDGE_LIMIT, TOOL_RESULT_CAP are intentionally not
+        # forwarded — driver-internal knobs, commented out in ENV.sh by
+        # default; driver.py's os.environ.get(name, default) handles them.
+        # To override, uncomment in ENV.sh AND add forward here.
         "SKILLS_DIR": "/srv/skills",
         "EFFECTIVE_COMMON_STORAGE": common_storage,
         "EFFECTIVE_COMMON_HOME": common_home,

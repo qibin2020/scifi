@@ -54,7 +54,7 @@ PRESCAN (ControlModel or highest, 1 LLM call)
 SELECT MODEL (ForceModel or pam.select: highest rank ≤ R, health + budget + blacklist)
   ↓
 ┌──────────────────────────────────────────────────────┐
-│ AGENT LOOP (fixed model, MAX_ITER, wall limit)       │
+│ AGENT LOOP (fixed model, MAX_ITERATIONS_WORK, wall limit)       │
 │  ├─ pause check (threading.Event)                    │
 │  ├─ wall limit (excludes tool + subagent time)       │
 │  ├─ effective iter count (read-only iters are free)  │
@@ -409,15 +409,20 @@ Pause mechanics:
 
 Three knobs bound a SAM run; whichever fires first wins.
 
-### 6.1 Iteration Cap
+### 6.1 Iteration Caps (per-agent)
+
+Each agent has its own iter cap; they don't gate each other (no global
+flooring).
 
 ```
-MAX_ITERATIONS = 50      # global per-SAM cap, not rank-scaled
+MAX_ITERATIONS_WORK        = 50   # worker iter cap per SAM
+MAX_ITERATIONS_REVIEW_DONE = 50   # done-case reviewer cap
+MAX_ITERATIONS_REVIEW_FAIL = 10   # failed-case reviewer cap
+MAX_ITERATIONS_REFLECT     = 15   # reflect (diagnostic) cap
 ```
 
-A SAM gets up to `MAX_ITERATIONS` effective iterations (read-only iters are
-free — see sec 7). Rank no longer scales this; rank only hints model
-selection in Pam.
+Worker: read-only iters are free (see sec 7). Rank only hints model
+selection in Pam — not iter scaling.
 
 ### 6.2 LLM-Only Wall (per-task, opt-in)
 
@@ -437,18 +442,23 @@ and the total wall limit apply.
 
 Hard clock limit that DOES count bash/tool time:
 ```
-TOTAL_WALL_PER_RANK = "300,600,1200,1800,3600,3600"   # driver fallback (varied per rank)
-# ENV.sh ships a uniform override: TOTAL_WALL_PER_RANK=3600,3600,3600,3600,3600,3600  (1 hr)
+TOTAL_WALL_PER_RANK = "2700,2700,2700,2700,2700,2700"   # uniform 45 min cap (driver default = ENV.sh)
 ```
 
 This catches tasks where bash calls consume hours while LLM time stays low.
-`BashTime: -1` in task metadata disables this cap (long bash workloads opt in).
+**Always enforced** — there is no opt-out. Tasks that legitimately need more
+clock time should raise `TOTAL_WALL_PER_RANK` (or use a per-task override via
+plan/metadata), not bypass the cap. Without this hard ceiling, a single hung
+bash (e.g. a Verilator sim that never terminates) freezes the driver forever.
 
 ### 6.4 Bash Timeout
 
 Agent suggests timeout per bash call: `bash(command="...", timeout=60)`
 - Capped by task's `BashTime` from metadata (or `MAX_BASH_TIME` default 300s)
-- `BashTime: -1` = no cap, disables total wall limit
+- `BashTime: -1` = no per-call cap (so a single bash command can run for hours
+  if the agent passes a large `timeout`). The **total wall limit (sec 6.3) is
+  still enforced** regardless — `BashTime: -1` is not an escape hatch from the
+  per-SAM clock cap.
 - `Slurm: on` implies `BashTime: -1` (SLURM jobs are inherently long-running)
 - Default if agent omits: 30s (hard, from tool schema)
 - For `BashTime: -1` tasks: environment hints strongly suggest `timeout: 86400` for
@@ -549,7 +559,7 @@ agent's first message, parsed from `task_content` at injection time.
 
 | Metadata | Hard (outer) | Soft hint (inner) |
 |----------|-------------|-------------------|
-| `BashTime: -1` | No timeout cap, no total wall | "Set timeout=86400 for workload commands" |
+| `BashTime: -1` | No per-call bash timeout cap (total wall still enforced) | "Set timeout=86400 for workload commands" |
 | `GPU: local/N/all` | `--nv`, pin GPUs | "GPU(s) pinned via CUDA_VISIBLE_DEVICES" |
 | `GPU: ALL` | `--nv`, all physical | "All physical GPUs exposed (debug)" |
 | `GPU: slurm` | `--nv` if available, Slurm default→on | "Prefer SLURM GPU for real workload" |
@@ -730,19 +740,22 @@ MAX_REVIEW_FAILURES, TASK_START, TASK_END, EVOLVE_START, EVOLVE_COMPLETE
 
 ```
 done → review PASS → return (success)
-done → review FAIL → retry (up to MAX_RETRIES)
-     → MAX_RETRIES → reflect → return UNVERIFIED
+done → review FAIL → append feedback, continue worker loop (in same SAM)
+     → review_failures ≥ MAX_RETRIES_REJECTED → reflect → return UNVERIFIED
 ```
 
 ### 10.2 Loop Exhausted → Review Triage
 
 ```
-MAX_ITERATIONS or WALL_LIMIT → review(failed)
-  → delay: pause N seconds, resume, re-run
-  → retry: update memory + model control + re-run
+MAX_ITERATIONS_WORK or WALL_LIMIT → review(failed)
+  → delay: pause N seconds, resume, re-run (new SAM)
+  → retry: update memory + model control + re-run (new SAM)
   → reflect: diagnose, return REFLECTION
 
-MAX_RECOVERY (default 3, env-tunable) prevents infinite delay/retry recursion
+MAX_RETRIES_EXHAUSTED (default 3) caps delay/retry rounds after
+LOOP_EXHAUSTED to prevent infinite recursion. Each retry spawns a new SAM.
+MAX_RETRIES_REJECTED (default 3) is the parallel cap on done-claim
+rejections within one SAM.
 ```
 
 ### 10.3 Model Control on Retry
@@ -854,7 +867,9 @@ Plan top-level fields:
 | `state_paths` | `["F/mnt"]` | what counts as "state" for fresh/pin/restore |
 | `lock_model` | none | rewrite `Pam/gateway.rank.yaml` to enable only this model. Backup at `<file>.bench-backup-<ts>`; restored on completion (or in `finally` on Ctrl-C). |
 | `total_wall_s` | none | override `ENV.sh:TOTAL_WALL_PER_RANK` uniformly. Backup + restore as above. |
-| `max_retries` | none | override `ENV.sh:MAX_RETRIES`. Shares the ENV.sh backup with `total_wall_s` (no double-backup). |
+| `max_iterations_work` | none | override `ENV.sh:MAX_ITERATIONS_WORK`. Shares the ENV.sh backup with `total_wall_s` (no double-backup). |
+| `max_iterations_review_done`, `max_iterations_review_fail`, `max_iterations_reflect` | none | per-agent iter cap overrides |
+| `max_retries_rejected`, `max_retries_exhausted` | none | per-path retry cap overrides |
 | `gateway_probe` | thresholds | abort thresholds for the pre-bench probe |
 | `batches` | required | sequence of batches |
 
@@ -1001,23 +1016,40 @@ Per-job env overrides (benchmarks / parallel runs):
 | `FALLBACK_HIGHEST` | (required) | Fallback model when rank system unavailable (prescan, review, evolution, ask) |
 | `FALLBACK_WORKING` | (required) | Fallback model for worker agents when rank system unavailable |
 | `SCIFI_MODEL` | (required) | Fixed model group for SciFi (outside container, no Pam) |
-| `MAX_ITERATIONS` | 50 | Absolute per-SAM iteration cap (overridden per-rank) |
+| `MAX_ITERATIONS_WORK` | 50 | Worker iter cap per SAM |
+| `MAX_ITERATIONS_REVIEW_DONE` | 50 | Done-case reviewer iter cap |
+| `MAX_ITERATIONS_REVIEW_FAIL` | 10 | Failed-case reviewer iter cap |
+| `MAX_ITERATIONS_REFLECT` | 15 | Reflect (diagnostic) agent iter cap |
+| `MAX_RETRIES_REJECTED` | 3 | Max done-claim rejection retries before reflect (within SAM) |
+| `MAX_RETRIES_EXHAUSTED` | 3 | Max LOOP_EXHAUSTED → retry rounds (each spawns new SAM) |
 | `CHECKPOINT_EVERY` | 5 | Re-grounding interval |
 | `MAX_CONTEXT` | 80 | Max messages before trimming |
 | `MAX_DEPTH` | 5 | Max subtask nesting |
-| `MAX_REVIEW_ITER` | 10 | Review agent iteration limit |
-| `MAX_REFLECT_ITER` | 15 | Reflection agent iteration limit |
-| `MAX_RETRIES` | 3 | Review rejections before reflect |
 | `MAX_PARALLEL_AGENTS` | 4 | Concurrent subtask limit |
 | `MAX_BASH_TIME` | 300 | Global bash timeout cap |
-| `TOTAL_WALL_PER_RANK` | 300,600,1200,1800,3600,3600 | Per-rank total wall limit (incl. bash). ENV.sh ships uniform 3600. |
+| `TOTAL_WALL_PER_RANK` | 2700,2700,2700,2700,2700,2700 | Per-rank total wall limit (incl. bash). Uniform 45 min cap. |
 | `ERROR_LIMIT` | 5 | Consecutive API errors before pam blacklists the worker model (sec 6.8) |
 | `NUDGE_LIMIT` | 5 | Consecutive no-tool-call / malformed-tool turns before blacklist (sec 6.8) |
-| `MAX_RECOVERY` | 3 | Delay/retry rounds after LOOP_EXHAUSTED before giving up (sec 10.2) |
-| `MAX_REVIEW_ITER_VERIFY` | 30 | Iter floor for done-case reviews on verify-heavy Expects |
 | `TOOL_RESULT_CAP` | 10000 | Chars kept of bash/read_file tool result (head + last 5 lines) |
 | `SKILLS_DIR` | ./skills | Skill library path |
 | `MAX_EVOLVE_ITER` | 20 | Evolution iteration limit |
+
+### Driver-internal flags (hardcoded in driver.py, no env override)
+
+These knobs were exposed as env vars at one point but are now compiled-in
+constants. Documented here for future study.
+
+| Constant | Value | History |
+|----------|-------|---------|
+| `ATTEMPT_HEADER` | `True` | Writes `## Attempt N` markdown headers between SAM-attempt feedback blocks. The chain-glue prompt depends on this format ("LATEST Attempt block"). All historical bench data ran with this on; no controlled comparison exists. |
+| `DYNAMIC_MAX_ITER` | `False` (experimental) | When set, prescan asks the planner for a per-task iter budget (5..MAX_ITERATIONS_WORK) based on task complexity. Code path retained behind the flag for a future study — could let trivial tasks finish in fewer iters and free wall budget. **Next-study candidate.** Set in driver.py to enable. |
+
+### Studied features (tried, no longer enabled)
+
+| Idea | Result | Status |
+|------|--------|--------|
+| `PROMOTE_RETRY_FEEDBACK=1` (prepend reviewer feedback at top of `user_msg` instead of appending at bottom) | X3/X4 ablation (Apr 29) showed pass-rate regression vs `=0`. n was small (~10 each) — not strictly conclusive but the trend was clear enough to drop. | **Removed**: branch and env knob deleted. Canonical behavior = bottom-append. |
+| `MAX_REVIEW_ITER_VERIFY` (auto-bump done-reviewer iter cap when Expect mentions verify/test/build keywords) | Keyword-matched without changing the reviewer prompt — half-feature. No measured effect distinct from setting `MAX_ITERATIONS_REVIEW_DONE` directly. | **Removed**: replaced by per-agent caps that apply uniformly. |
 
 ### gateway.rank.yaml Fields
 
@@ -1080,16 +1112,18 @@ ENV.sh (host)
 | `FALLBACK_HIGHEST` | model group name | portal.py (driver, evolution, ask) | driver.py→Pam, evolution.py, ask.py |
 | `FALLBACK_WORKING` | model group name | portal.py (driver) | driver.py→Pam |
 | `SCIFI_MODEL` | model group name | (not passed — SciFi runs on host) | SciFi (os.environ) |
-| `MAX_ITERATIONS` | `50` | portal.py (driver) | driver.py |
+| `MAX_ITERATIONS_WORK` | `50` | portal.py (driver) | driver.py |
+| `MAX_ITERATIONS_REVIEW_DONE` | `50` | portal.py (driver) | driver.py |
+| `MAX_ITERATIONS_REVIEW_FAIL` | `10` | portal.py (driver) | driver.py |
+| `MAX_ITERATIONS_REFLECT` | `15` | portal.py (driver) | driver.py |
+| `MAX_RETRIES_REJECTED` | `3` | portal.py (driver) | driver.py |
+| `MAX_RETRIES_EXHAUSTED` | `3` | portal.py (driver) | driver.py |
 | `CHECKPOINT_EVERY` | `5` | portal.py (driver) | driver.py |
 | `MAX_CONTEXT` | `80` | portal.py (driver) | driver.py |
 | `MAX_DEPTH` | `5` | portal.py (driver) | driver.py |
-| `MAX_REVIEW_ITER` | `10` | portal.py (driver) | driver.py |
-| `MAX_REFLECT_ITER` | `15` | portal.py (driver) | driver.py |
-| `MAX_RETRIES` | `3` | portal.py (driver) | driver.py |
 | `MAX_PARALLEL_AGENTS` | `4` | portal.py (driver) | driver.py |
 | `MAX_BASH_TIME` | `300` | portal.py (driver) | driver.py |
-| `TOTAL_WALL_PER_RANK` | `300,600,1200,1800,3600,3600` | portal.py (driver) | driver.py |
+| `TOTAL_WALL_PER_RANK` | `2700,2700,2700,2700,2700,2700` | portal.py (driver) | driver.py |
 | `SKILLS_DIR` | `/srv/skills` | portal.py (driver), task_maker.sh, skill_maker.sh | driver.py, skill_maker.py |
 | `MAX_EVOLVE_ITER` | `20` | portal.py (evolution) | evolution.py |
 | `CAM_DIR` | `$BASEDIR/Cam` → `/cam` | portal.py (all profiles, conditional) | All Python agents (audit) |

@@ -35,13 +35,15 @@ _test_env = {
     "GATEWAY_PORT": "12345",
     "FALLBACK_HIGHEST": "test-model",
     "FALLBACK_WORKING": "test-worker",
-    "MAX_ITERATIONS": "50",
+    "MAX_ITERATIONS_WORK": "50",
+    "MAX_ITERATIONS_REVIEW_DONE": "50",
+    "MAX_ITERATIONS_REVIEW_FAIL": "10",
+    "MAX_ITERATIONS_REFLECT": "15",
+    "MAX_RETRIES_REJECTED": "3",
+    "MAX_RETRIES_EXHAUSTED": "3",
     "CHECKPOINT_EVERY": "5",
     "MAX_CONTEXT": "80",
     "MAX_DEPTH": "5",
-    "MAX_REVIEW_ITER": "10",
-    "MAX_REFLECT_ITER": "15",
-    "MAX_RETRIES": "3",
     "MAX_PARALLEL_AGENTS": "4",
     "MAX_BASH_TIME": "300",
     "TOTAL_WALL_PER_RANK": "1800,1800,1800,1800,1800,1800",
@@ -103,7 +105,7 @@ class TestDriverProfile(unittest.TestCase):
         cmd = portal.build_driver_cmd("basic_task", [])
         cmd_str = " ".join(cmd)
         self.assertIn("GATEWAY_URL=http://localhost:12345", cmd_str)
-        self.assertIn("MAX_ITERATIONS=50", cmd_str)
+        self.assertIn("MAX_ITERATIONS_WORK=50", cmd_str)
         self.assertIn("SKILLS_DIR=/srv/skills", cmd_str)
 
     def test_effective_common_storage_passed(self):

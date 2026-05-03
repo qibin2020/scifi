@@ -44,10 +44,22 @@ from task_parser import parse_task, public_meta, TaskFormatError
 GATEWAY = os.environ.get("GATEWAY_URL", "http://localhost:4000")
 FALLBACK_HIGHEST = os.environ["FALLBACK_HIGHEST"]
 FALLBACK_WORKING = os.environ["FALLBACK_WORKING"]
-MAX_ITER = int(os.environ.get("MAX_ITERATIONS", "50"))  # absolute cap (overridden per-rank)
-MAX_REVIEW_ITER = int(os.environ.get("MAX_REVIEW_ITER", "100"))
-MAX_REFLECT_ITER = int(os.environ.get("MAX_REFLECT_ITER", "15"))
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
+# Per-agent iter caps (4 vars; each agent uses its own cap independently).
+MAX_ITERATIONS_WORK        = int(os.environ.get("MAX_ITERATIONS_WORK",        "50"))
+MAX_ITERATIONS_REVIEW_DONE = int(os.environ.get("MAX_ITERATIONS_REVIEW_DONE", "50"))
+MAX_ITERATIONS_REVIEW_FAIL = int(os.environ.get("MAX_ITERATIONS_REVIEW_FAIL", "10"))
+MAX_ITERATIONS_REFLECT     = int(os.environ.get("MAX_ITERATIONS_REFLECT",     "15"))
+# Per-path retry caps (2 vars; independent counters for the two failure paths).
+MAX_RETRIES_REJECTED  = int(os.environ.get("MAX_RETRIES_REJECTED",  "3"))
+MAX_RETRIES_EXHAUSTED = int(os.environ.get("MAX_RETRIES_EXHAUSTED", "3"))
+# When DYNAMIC_MAX_ITER=1, prescan asks the planner for a per-task iter budget
+# (5..MAX_ITERATIONS_WORK) based on task complexity. _run_sam clamps it.
+DYNAMIC_MAX_ITER = os.environ.get("DYNAMIC_MAX_ITER", "0") == "1"
+# _append_feedback writes "## Attempt N" headers between SAM-attempt blocks
+# in the review-feedback file. Provides explicit attempt count + markdown
+# structure for the chain-glue framing ("LATEST Attempt block", etc.) to
+# refer to. The chain-glue prompt depends on this format.
+ATTEMPT_HEADER = True
 CHECKPOINT_EVERY = int(os.environ.get("CHECKPOINT_EVERY", "5"))
 MAX_CONTEXT = int(os.environ.get("MAX_CONTEXT", "80"))
 MAX_DEPTH = int(os.environ.get("MAX_DEPTH", "5"))
@@ -57,9 +69,9 @@ MAX_BASH_TIME = int(os.environ.get("MAX_BASH_TIME", "300"))  # max seconds per b
 # Per-rank TOTAL wall limit (including bash/tool time). 0 = disabled.
 # Safety net only — bash is already capped separately. Rank is otherwise
 # purely a hint to Pam for model selection; iteration count is bounded
-# globally by MAX_ITER, and LLM-only wall (if any) comes from per-task
+# by MAX_ITERATIONS_WORK, and LLM-only wall (if any) comes from per-task
 # Timeout/ThinkTime metadata, not from a rank-default table.
-TOTAL_WALL_PER_RANK = os.environ.get("TOTAL_WALL_PER_RANK", "300,600,1200,1800,3600,3600")
+TOTAL_WALL_PER_RANK = os.environ.get("TOTAL_WALL_PER_RANK", "2700,2700,2700,2700,2700,2700")
 _total_wall_limits = [int(x) for x in TOTAL_WALL_PER_RANK.split(",")]
 # Context caps (chars). Full content always available via tools.
 CAP_MEMORY = int(os.environ.get("CAP_MEMORY", "4000"))
@@ -73,17 +85,9 @@ TOOL_RESULT_CAP = int(os.environ.get("TOOL_RESULT_CAP", "10000"))
 # Robustness thresholds. ERROR_LIMIT/NUDGE_LIMIT trigger session blacklist for
 # the worker model when a model is fundamentally broken (wrong creds, malformed
 # id, gateway misroute) vs. having a transient hiccup. Raise to be more tolerant
-# of upstream flake; lower for tighter detection. MAX_RECOVERY caps the number
-# of delay/retry rounds after LOOP_EXHAUSTED to prevent infinite recursion.
+# of upstream flake; lower for tighter detection.
 ERROR_LIMIT = int(os.environ.get("ERROR_LIMIT", "5"))
 NUDGE_LIMIT = int(os.environ.get("NUDGE_LIMIT", "5"))
-MAX_RECOVERY = int(os.environ.get("MAX_RECOVERY", "3"))
-
-# Done-case review iteration floor when the Expect block references verification
-# artifacts (verify/test/pass/contain/log/compile/build/output keywords). The
-# review burns iterations re-running build/test commands; this floor keeps it
-# from prematurely dropping to the no-tool fallback.
-MAX_REVIEW_ITER_VERIFY = int(os.environ.get("MAX_REVIEW_ITER_VERIFY", "30"))
 DRIVER_PATH = os.path.abspath(__file__)
 DRIVER_DIR = os.path.dirname(DRIVER_PATH)
 SKILLS_DIR = os.environ.get("SKILLS_DIR", os.path.join(DRIVER_DIR, "skills"))
@@ -137,9 +141,9 @@ _ENV_SKILLS = ("common_env", "local_env", "temp_env")
 _ENV_FALLBACK_PROMPT = (
     "---\nEnv fallback: no env skill loaded. The container system env is "
     "read-only — install packages under /tmp/mamba_env using micromamba "
-    "(pre-installed on PATH). After creating an env, write env.sh in the "
-    "task dir exporting MAMBA_ROOT_PREFIX, CONDA_PREFIX, PATH, and "
-    "LD_LIBRARY_PATH so subsequent bash calls auto-activate."
+    "(pre-installed on PATH). After creating an env, call "
+    "`activate_env(env_path=\"/tmp/mamba_env/envs/<name>\")` once; "
+    "subsequent bash calls inherit PATH/LD_LIBRARY_PATH automatically."
 )
 
 
@@ -290,6 +294,60 @@ def _total_wall_for_rank(rank):
 
 
 # ============================================================
+# HARD TOTAL-WALL WATCHDOG
+# ============================================================
+# Two-stage enforcement of TOTAL_WALL_PER_RANK across the WHOLE workflow
+# (worker loop, review, retry, reflect, post-task), not just the worker:
+#   1. Soft kill at the cap. _WALL_EXCEEDED is set; loops in _run_sam,
+#      _run_agent_loop, review_sam, reflect_sam, and the retry/delay path
+#      check it and exit early with a partial verdict.
+#   2. Hard floor at cap + WRAP_UP_GRACE_S. The watchdog calls os._exit(124)
+#      so the driver process is guaranteed to terminate within wall + grace
+#      regardless of where execution is stuck (hung LLM call, frozen tool,
+#      review burning iterations, etc.).
+# Configure via TOTAL_WALL_PER_RANK and WRAP_UP_GRACE_S in ENV.sh — never
+# wrap the driver in an external `timeout` on top.
+
+WRAP_UP_GRACE_S = int(os.environ.get("WRAP_UP_GRACE_S", "600"))
+_WALL_EXCEEDED = threading.Event()
+_WATCHDOG_LOCK = threading.Lock()
+_WATCHDOG_STARTED = False
+
+
+def _ensure_wall_watchdog(task_wall_start, total_wall):
+    """Arm the hard total-wall watchdog. Idempotent — only the first call
+    per process starts the daemon thread (subsequent retries inherit it).
+    No-op when total_wall is 0 (cap disabled)."""
+    global _WATCHDOG_STARTED
+    if not total_wall:
+        return
+    with _WATCHDOG_LOCK:
+        if _WATCHDOG_STARTED:
+            return
+        _WATCHDOG_STARTED = True
+
+    def _watchdog():
+        deadline = task_wall_start + total_wall
+        while True:
+            now = time.time()
+            if now >= deadline:
+                break
+            time.sleep(min(5.0, max(0.5, deadline - now)))
+        _WALL_EXCEEDED.set()
+        time.sleep(WRAP_UP_GRACE_S)
+        try:
+            _cam("HARD_TOTAL_WALL_EXIT",
+                 wall=time.time() - task_wall_start,
+                 limit=total_wall, grace=WRAP_UP_GRACE_S)
+        except Exception:
+            pass
+        os._exit(124)
+
+    threading.Thread(target=_watchdog, daemon=True,
+                     name="wall-watchdog").start()
+
+
+# ============================================================
 # AGENT NODE (threading primitive)
 # ============================================================
 
@@ -401,8 +459,11 @@ def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
     cm = control_match  # already a string or None
     model = _resolve_control_model(cm)
 
-    if rank_match and not md_files:
-        # Self-declared rank, no subtasks — skip LLM call
+    # Self-declared fast path: skip LLM call when rank is hardcoded and there
+    # are no subtasks. Disabled when DYNAMIC_MAX_ITER=1 — phase 3 needs the
+    # planner's actual look at task content + memory + global memory to
+    # suggest a per-task iter budget; the fast path would defeat that.
+    if rank_match and not md_files and not DYNAMIC_MAX_ITER:
         result = {
             "rank": int(rank_match),
             "subtasks": [],
@@ -432,6 +493,15 @@ def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
     if _skill_catalog:
         skills_info = (f"Available skills:\n{_skill_catalog}\n\n"
             f"Task suggests skills: {suggested_skills or '(none)'}\n\n")
+    iter_field = (
+        '"suggested_max_iter": <5..50 — agent-loop iteration budget>, '
+        if DYNAMIC_MAX_ITER else "")
+    iter_rule = (
+        f"- suggested_max_iter: estimate how many agent-loop iterations this "
+        f"task needs; trivial tasks (e.g. echo a fact) ~5-10, simple builds "
+        f"~10-20, multi-step builds with debug ~20-35, hard creative tasks "
+        f"with unknown obstacles ~35-50. Bound: 5 ≤ N ≤ {MAX_ITERATIONS_WORK}.\n"
+        if DYNAMIC_MAX_ITER else "")
     prompt = (
         f"Analyze this SAM task. Reply with ONLY valid JSON.\n\n"
         f"Task content:\n{task_content[:3000]}\n\n"
@@ -440,10 +510,12 @@ def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
         f"{skills_info}"
         f"Reply format:\n"
         f'{{"rank": <0-{mr} difficulty>, '
+        f'{iter_field}'
         f'"subtasks": [{{"file": "name.md", "rank": <0-{mr}>, "depends_on": ["other.md"]}}], '
         f'"skills": ["skill_name", ...]}}\n\n'
         f"Rules:\n"
         f"- rank 0 = trivial, {mr} = complex\n"
+        f"{iter_rule}"
         f"- depends_on lists files that must complete first\n"
         f"- dependencies must form a tree (no cycles)\n"
         f"- if no subtasks found, return empty list\n"
@@ -475,6 +547,13 @@ def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
 
     rank = int(plan.get("rank", 1))
     subtasks = plan.get("subtasks", [])
+    if DYNAMIC_MAX_ITER:
+        smi = plan.get("suggested_max_iter")
+        if isinstance(smi, (int, float)) and smi > 0:
+            # _run_sam will clamp to [5, MAX_ITERATIONS_WORK]
+            pass
+        else:
+            smi = 10 + 10 * max(0, min(rank, 4))  # rank-derived fallback
 
     # Assemble context for each subtask (capped)
     context = {}
@@ -526,6 +605,8 @@ def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
         result["thinking_budget"] = int(thinking_match)
     result["no_memory"] = no_memory
     result["task_group"] = task_group
+    if DYNAMIC_MAX_ITER:
+        result["suggested_max_iter"] = int(smi)
     return result
 
 
@@ -600,6 +681,9 @@ A SAM is a closed loop defined by a .md file with three sections:
 
 Capabilities (via tool calls):
 - bash: run any shell command
+- list_shared_envs: enumerate /mnt/sci_envs/ (shared toolchain envs)
+- read_env_manifest: read an env's .manifest.json (purpose, aliases, notes)
+- activate_env: activate a shared env for all subsequent bash calls
 - read_file: read a file (relative to task dir)
 - write_file: create/overwrite a file
 - edit_file: replace a string in a file (faster than write_file for small fixes)
@@ -610,25 +694,22 @@ Capabilities (via tool calls):
 
 Environment:
 - Your task directory (./) is writable and persistent — put all output here.
+- For shared toolchains under /mnt/sci_envs/, use the env tools, not env.sh:
+    1) `list_shared_envs` to see what's available + each env's purpose
+    2) `read_env_manifest(env_path=...)` to inspect (aliases like $CXX, notes)
+    3) `activate_env(env_path=...)` once — every subsequent bash call gets
+       PATH, LD_LIBRARY_PATH, MAMBA_ROOT_PREFIX, CONDA_PREFIX, and any
+       manifest aliases ($CXX, $CC, ...) injected automatically.
+  After activate_env, run bare commands (`python3 ...`, `verilator ...`,
+  `make ...`). Do NOT write env.sh and do NOT prefix with `micromamba run`.
+  Each bash result starts with `[active env: <path>]` (or `[no active env]`)
+  so you can always see the active state — no probing needed.
 - micromamba is in PATH but the active env (/F/mamba) is the DRIVER's env,
   NOT yours. It is read-only. Do NOT pip install or micromamba install into it.
   Writes may appear to succeed (RAM layer) but WILL be silently lost on exit.
-  To install packages, create a NEW env under ./ :
-    MAMBA_ROOT_PREFIX=./mamba_env micromamba create -n work python=3.12 -y
-    micromamba run -r ./mamba_env -n work pip install <pkg>
-- env.sh is the standard way to persist environment setup across bash calls.
-  If env.sh exists in ./, it is auto-sourced before every bash command.
-  After finding or creating an environment, IMMEDIATELY write env.sh.
-  Use absolute paths anchored to env.sh itself — relative ./ paths break
-  as soon as a command does `cd subdir && ...` or a script internally
-  calls subprocess.run:
-    cat > env.sh << 'EOF'
-    _ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    export PATH="$_ENV_ROOT/mamba_env/envs/work/bin:$PATH"
-    export LD_LIBRARY_PATH="$_ENV_ROOT/mamba_env/envs/work/lib:${LD_LIBRARY_PATH:-}"
-    EOF
-  Then all subsequent bash commands will have the env's tools available as
-  bare commands — no prefixes needed.
+  If you genuinely need to BUILD a new env (no shared one fits), create it
+  under /mnt/sci_envs/<prefix>/ with `micromamba create`, then activate_env
+  on the resulting `<prefix>/envs/<name>` path.
 - /tmp is writable but not persistent across runs.
 - Writes to paths outside ./ may silently vanish. Always use ./
 
@@ -636,7 +717,11 @@ Follow the SAM structure: understand Context, execute Todo, satisfy Expect.
 Memory and global experience in your context may be truncated — use
 memory_read or read_file tools to access full versions when needed.
 An independent reviewer will check your Expect claims after you call done.
-Call done only when you believe all expectations are truly met.
+Call done only when you believe all expectations are truly met. Specifically,
+you must have RUN every verification command implied by Expect (and seen it
+pass) — if Expect lists multiple modes or conditions (e.g. "both A and B
+pass"), verify all of them. Calling done after testing only a subset is
+overconfidence; the reviewer will run the omitted check and reject.
 
 When you call done, include two things in the summary:
 
@@ -665,7 +750,15 @@ Bash output may be truncated for long commands. To get specific results from
 long output, use grep, tail, or redirect to a file and read the parts you need.
 
 If a fix does not work, diagnose before retrying — read error output, check
-assumptions, and understand why it failed. Do not rewrite code blindly."""
+assumptions, and understand why it failed. Do not rewrite code blindly.
+
+When verify fails and you can't immediately name which dimension of your
+code is wrong, do NOT keep editing. Expand your diagnostic surface first:
+write a small probe with simpler inputs, add print statements to YOUR code
+(not the verifier), or vary one parameter at a time. Each iteration should
+NARROW your hypothesis (e.g. "I now suspect timing, not bit order"). If
+you can't name a specific suspect, you need more diagnostic, not more
+code variants."""
 
 # Conditional system prompt sections, assembled from task metadata
 SYSTEM_HOME = """\
@@ -677,11 +770,11 @@ SYSTEM_MNT_RW = """\
   Use it for large reusable assets (shared envs, datasets)."""
 
 SYSTEM_MNT_ENVS = """\
-- /mnt/sci_envs/ may contain shared pre-built environments. Check there
-  FIRST before installing anything:
-    ls /mnt/sci_envs/
-  Each subdirectory is a MAMBA_ROOT_PREFIX with envs inside. If a matching
-  env exists, reuse it by writing env.sh with its paths."""
+- /mnt/sci_envs/ may contain shared pre-built environments. Use the
+  list_shared_envs / read_env_manifest / activate_env tools (NOT bash
+  probing) to discover and activate. After activate_env, every bash call
+  has the env's PATH, LD_LIBRARY_PATH, MAMBA_ROOT_PREFIX, CONDA_PREFIX,
+  and any manifest aliases ($CXX, $CC, ...) injected automatically."""
 
 SYSTEM_MNT_RO = """\
 - /mnt is shared storage across tasks, read-only in this run.
@@ -773,18 +866,19 @@ CASE 1 — Worker called `done`  (your primary duty: independent verification)
 
   6. ENV-REUSE POLICY — do NOT rebuild the environment.
      When the worker claims done, the env is in a good state by definition.
-     Your bash is auto-wrapped with `. env.sh && ...` so tools are on PATH.
+     Whatever env the worker activated (via `activate_env`) is already
+     active for your bash calls — every result starts with `[active env:
+     <path>]` so you can confirm. Manifest aliases (e.g. $CXX) and PATH
+     are injected, so just run bare commands.
        - common_env (shared /mnt/sci_envs/<prefix>): READ-ONLY. Never
-         rebuild, never pip/mamba install anything there. Just source
-         env.sh (automatic) and run bare commands.
-       - local_env (./mamba_env) or temp_env (/tmp/mamba_env): REUSE what
-         the worker built. Do not recreate. env.sh is auto-sourced.
-       - If env.sh is missing or malformed, surface that as a failure —
-         don't invent a new env.
-     "Module not found" in system python when the worker used a local env
-     is NOT fabrication — it means you bypassed env.sh. Try again with
-     the env. `bash` in this agent auto-sources env.sh; just don't write
-     commands that `cd` elsewhere and shadow the wrapper.
+         rebuild, never pip/mamba install anything there.
+       - local_env (./mamba_env) or temp_env (/tmp/mamba_env): legacy
+         env.sh tasks — bash auto-sources env.sh if `.active_env.json`
+         is absent. Do not recreate.
+       - If `[no active env]` shows up but the task needed one, surface
+         that as a failure — don't invent or activate a new one.
+     "Module not found" while `[active env: ...]` is shown is a real
+     failure (missing package in the env), not a wrapper bypass.
 
   7. RANDOMIZATION — vary inputs to catch over-fitting/fabrication.
      If the verification uses a random seed, a fixed sample, or a specific
@@ -841,10 +935,16 @@ CASE 1 — Worker called `done`  (your primary duty: independent verification)
   recommend re-reading the interface spec / reference data before
   rewriting."
 
-CASE 2 — Worker hit MAX_ITERATIONS  (forward-looking guidance)
+CASE 2 — Worker hit MAX_ITERATIONS_WORK  (forward-looking guidance)
 
   The worker ran out of iterations without calling done. Your job is to route
   the task toward success on the next attempt.
+
+  SAMPLING COLLAPSE: if the worker produced little/no productive tool use
+  (many NUDGE events, malformed tool calls, prose-only turns, or off-task
+  content), this is a sampling pathology, not a task issue. Pick RETRY,
+  set exclude_model=true, and put "(skip diagnosis — sampling collapse)" in
+  memory_update. Don't synthesize fixes for nonsense output.
 
   Decide:
     - DELAY:   task depends on unfinished sibling work. Suggest wait time.
@@ -901,10 +1001,12 @@ verify each criterion — observe real state with your own tools. Do not trust
 worker-produced log files or claims; if a criterion references a test/verify
 script, re-run it yourself and use the live output.
 
-Env reuse: bash auto-sources env.sh, so the worker's env is active. Do NOT
-rebuild it. If worker included a `## Verification Reference` block in the
-done summary, use it as a warmup (env path, verify command), then verify
-independently. When inputs are random, vary the seed to catch over-fitting.
+Env reuse: whatever shared env the worker activated is already active in
+your bash (output is prefixed with `[active env: <path>]`); for legacy
+env.sh tasks, env.sh is auto-sourced. Do NOT rebuild. If the worker
+included a `## Verification Reference` block in the done summary, use it
+as a warmup (env path, verify command), then verify independently. When
+inputs are random, vary the seed to catch over-fitting.
 
 Then call `verdict` with passed=true/false, observations (quoting the real
 output you saw), and reason. When rejecting, look for a PATTERN in the
@@ -937,12 +1039,41 @@ Diagnose, update memory, call `diagnosis`."""
 
 TOOLS = [
     {"type": "function", "function": {"name": "bash",
-        "description": "Execute a bash command. Returns stdout+stderr. "
+        "description": "Execute a bash command. Returns stdout+stderr prefixed "
+            "with `[active env: <path>]` (or `[no active env]`) so you can "
+            "always see which shared env is active. PATH/LD_LIBRARY_PATH and "
+            "any manifest aliases (e.g. CXX) are pre-injected by the runtime — "
+            "use bare commands (python3, verilator, make), no env.sh needed. "
             "Set timeout for long-running commands (default 30s, max from config).",
         "parameters": {"type": "object", "properties": {
             "command": {"type": "string"},
             "timeout": {"type": "integer", "description": "Seconds to wait (default 30)"}},
             "required": ["command"]}}},
+    {"type": "function", "function": {"name": "list_shared_envs",
+        "description": "List shared envs available under /mnt/sci_envs/. "
+            "Returns env paths with one-line purposes pulled from each env's "
+            "manifest. Call this FIRST when a task needs a shared toolchain.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "read_env_manifest",
+        "description": "Return the .manifest.json for a shared env (purpose, "
+            "binaries, aliases, notes). Use after list_shared_envs to inspect "
+            "an env's contents before activating.",
+        "parameters": {"type": "object", "properties": {
+            "env_path": {"type": "string",
+                "description": "Absolute path to the env (e.g. /mnt/sci_envs/<prefix>/envs/<name>)"}},
+            "required": ["env_path"]}}},
+    {"type": "function", "function": {"name": "activate_env",
+        "description": "Activate a shared env for ALL subsequent bash calls. "
+            "Once activated, PATH/LD_LIBRARY_PATH/MAMBA_ROOT_PREFIX/CONDA_PREFIX "
+            "and any manifest aliases (e.g. $CXX) are injected automatically — "
+            "you do NOT need to write env.sh, source anything, or prefix "
+            "commands with `micromamba run`. The activation persists across "
+            "iterations and is shared with the reviewer. Bash output prefix "
+            "`[active env: <path>]` confirms each call ran with this env.",
+        "parameters": {"type": "object", "properties": {
+            "env_path": {"type": "string",
+                "description": "Absolute path to the env, e.g. /mnt/sci_envs/<prefix>/envs/<name>"}},
+            "required": ["env_path"]}}},
     {"type": "function", "function": {"name": "read_file",
         "description": "Read a file. Returns first 10k chars by default. Use offset/limit for large files.",
         "parameters": {"type": "object", "properties": {
@@ -989,9 +1120,19 @@ TOOLS = [
 
 REVIEW_TOOLS = [
     {"type": "function", "function": {"name": "bash",
-        "description": "Inspect state (read-only).",
+        "description": "Inspect state (read-only). Output is prefixed with "
+            "`[active env: <path>]` showing which shared env (if any) the "
+            "worker activated — that env's PATH/LD/aliases are already "
+            "injected, so just run bare commands (no need to source env.sh).",
         "parameters": {"type": "object", "properties": {
             "command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "list_shared_envs",
+        "description": "List shared envs under /mnt/sci_envs/.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "read_env_manifest",
+        "description": "Read the .manifest.json for a shared env.",
+        "parameters": {"type": "object", "properties": {
+            "env_path": {"type": "string"}}, "required": ["env_path"]}}},
     {"type": "function", "function": {"name": "read_file",
         "description": "Read a file. Use offset/limit for large files.",
         "parameters": {"type": "object", "properties": {
@@ -1032,9 +1173,16 @@ REVIEW_TOOLS = [
 
 REFLECT_TOOLS = [
     {"type": "function", "function": {"name": "bash",
-        "description": "Inspect state.",
+        "description": "Inspect state. Output is prefixed with `[active env: <path>]`.",
         "parameters": {"type": "object", "properties": {
             "command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "list_shared_envs",
+        "description": "List shared envs under /mnt/sci_envs/.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "read_env_manifest",
+        "description": "Read the .manifest.json for a shared env.",
+        "parameters": {"type": "object", "properties": {
+            "env_path": {"type": "string"}}, "required": ["env_path"]}}},
     {"type": "function", "function": {"name": "read_file",
         "description": "Read a file. Use offset/limit for large files.",
         "parameters": {"type": "object", "properties": {
@@ -1163,8 +1311,16 @@ def _read_feedback(task_dir, task_file):
 def _append_feedback(task_dir, task_file, block):
     fp = _feedback_path(task_dir, task_file)
     ts = time.strftime('%H:%M:%S')
-    with open(fp, "a") as f:
-        f.write(f"\n---\n[{ts}] {block}\n")
+    if ATTEMPT_HEADER:
+        # Count prior "## Attempt" headers to determine this attempt's number.
+        attempt_n = 1
+        if os.path.exists(fp):
+            attempt_n = open(fp).read().count("\n## Attempt ") + 1
+        with open(fp, "a") as f:
+            f.write(f"\n## Attempt {attempt_n} ({ts})\n{block}\n")
+    else:
+        with open(fp, "a") as f:
+            f.write(f"\n---\n[{ts}] {block}\n")
 
 
 def _clear_feedback(task_dir, task_file):
@@ -1412,26 +1568,195 @@ def _compact_text(text, instruction=""):
 
 
 def _prepare_bash(command, task_dir):
-    """Wrap command with env.sh sourcing if the file exists in task_dir.
+    """Legacy fallback: wrap command with env.sh sourcing if the file exists.
 
-    Source by absolute path so the env activates even when the command does
-    `cd subdir && ...` before any env lookup — relative `. ./env.sh` would
-    miss if the script internally changes cwd and then looks up binaries.
+    Preferred path is `activate_env` which writes `.active_env.json` and
+    injects vars via subprocess `env=`. This fallback only fires when the
+    agent (or an old task) wrote env.sh by hand and there is no active env.
     """
+    if os.path.isfile(os.path.join(task_dir, ".active_env.json")):
+        return command  # active env is injected via env= dict; don't double-source
     env_sh = os.path.join(task_dir, "env.sh")
     if os.path.isfile(env_sh):
         return f'. "{os.path.abspath(env_sh)}" && {command}'
     return command
 
 
+# ----- ACTIVE ENV (replaces env.sh + auto-source) -----
+#
+# Active-env state lives at `<task_dir>/.active_env.json` and is shared
+# between worker, reviewer, and reflector inside the same container task.
+# Format:
+#   {"path": "/mnt/sci_envs/<prefix>/envs/<name>", "manifest": {...}}
+# Manifest is whatever `read_env_manifest` returned at activate time (a
+# copy is stored so later edits to the manifest file don't change a
+# running task's behavior).
+
+_SCI_ENVS_ROOT = "/mnt/sci_envs"
+
+
+def _load_active_env(task_dir):
+    p = os.path.join(task_dir, ".active_env.json")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_active_env(task_dir, data):
+    p = os.path.join(task_dir, ".active_env.json")
+    with open(p, "w") as f:
+        json.dump(data, f)
+
+
+def _read_env_manifest(env_path):
+    """Return parsed manifest for an env path, or {} if none.
+    Looks for `.manifest.json` at the env root or one level up at the prefix."""
+    if not env_path:
+        return {}
+    # Try env-level first, then prefix-level (one above envs/<name>)
+    candidates = [
+        os.path.join(env_path, ".manifest.json"),
+        os.path.join(os.path.dirname(os.path.dirname(env_path)),
+                     ".manifest.json"),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            try:
+                with open(p) as f:
+                    return json.load(f)
+            except Exception:
+                continue
+    return {}
+
+
+def _list_shared_envs():
+    """Enumerate /mnt/sci_envs/. Returns a printable summary plus a JSON list."""
+    root = _SCI_ENVS_ROOT
+    if not os.path.isdir(root):
+        return "(no /mnt/sci_envs — common storage not mounted)"
+    items = []
+    for prefix_name in sorted(os.listdir(root)):
+        prefix_dir = os.path.join(root, prefix_name)
+        envs_dir = os.path.join(prefix_dir, "envs")
+        if not os.path.isdir(envs_dir):
+            continue
+        # purpose source: prefix-level .manifest.json -> PURPOSE.md -> directory name
+        manifest_path = os.path.join(prefix_dir, ".manifest.json")
+        purpose_md = os.path.join(prefix_dir, "PURPOSE.md")
+        purpose = ""
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path) as f:
+                    purpose = json.load(f).get("purpose", "")
+            except Exception:
+                pass
+        if not purpose and os.path.isfile(purpose_md):
+            try:
+                with open(purpose_md) as f:
+                    head = f.read(400).strip().splitlines()
+                purpose = next((ln.lstrip("# ").strip() for ln in head
+                                if ln.strip() and not ln.startswith("#")), "")
+                if not purpose and head:
+                    purpose = head[0].lstrip("# ").strip()
+            except Exception:
+                pass
+        for env_name in sorted(os.listdir(envs_dir)):
+            env_path = os.path.join(envs_dir, env_name)
+            if not os.path.isdir(env_path):
+                continue
+            env_manifest = _read_env_manifest(env_path)
+            env_purpose = env_manifest.get("purpose", purpose) or "(no description)"
+            items.append({"path": env_path, "purpose": env_purpose})
+    if not items:
+        return "(no shared envs found under /mnt/sci_envs/)"
+    lines = ["Shared envs under /mnt/sci_envs/ (use activate_env with one of these paths):"]
+    for it in items:
+        lines.append(f"- {it['path']}\n    purpose: {it['purpose']}")
+    return "\n".join(lines)
+
+
+def _activate_env(env_path):
+    """Validate env_path, load manifest, write .active_env.json. Returns
+    (ok, message). Caller is responsible for setting task_dir and calling
+    _save_active_env."""
+    if not env_path or not os.path.isdir(env_path):
+        return False, f"ERROR: env path not found: {env_path}"
+    bin_dir = os.path.join(env_path, "bin")
+    if not os.path.isdir(bin_dir):
+        return False, f"ERROR: {env_path} has no bin/ directory"
+    manifest = _read_env_manifest(env_path)
+    return True, manifest
+
+
+def _build_active_env_vars(active):
+    """Given an active-env dict, return a mapping of env vars to inject.
+    Strict superset of os.environ — caller merges via dict.update()."""
+    if not active:
+        return {}
+    env_path = active.get("path", "")
+    if not env_path:
+        return {}
+    manifest = active.get("manifest", {}) or {}
+    bin_dir = os.path.join(env_path, "bin")
+    lib_dir = os.path.join(env_path, "lib")
+    # Prefix is the parent of envs/<name>
+    prefix_dir = os.path.dirname(os.path.dirname(env_path))
+    overrides = {
+        "MAMBA_ROOT_PREFIX": prefix_dir,
+        "CONDA_PREFIX": env_path,
+    }
+    # PATH / LD_LIBRARY_PATH: prepend env's bin/lib
+    base_path = os.environ.get("PATH", "/usr/bin:/bin")
+    overrides["PATH"] = f"{bin_dir}:{base_path}"
+    base_ld = os.environ.get("LD_LIBRARY_PATH", "")
+    overrides["LD_LIBRARY_PATH"] = (f"{lib_dir}:{base_ld}" if base_ld
+                                    else lib_dir)
+    # Aliases from manifest (e.g. CXX, CC). Resolve to absolute paths
+    # relative to env_path so they work regardless of cwd.
+    for k, v in (manifest.get("aliases") or {}).items():
+        if not isinstance(v, str):
+            continue
+        if v.startswith("/"):
+            overrides[k] = v
+        else:
+            overrides[k] = os.path.join(env_path, v)
+    # Extra env vars (free-form) from manifest
+    for k, v in (manifest.get("env") or {}).items():
+        if isinstance(v, str):
+            overrides[k] = v
+    return overrides
+
+
+def _active_env_header(active):
+    """One-line header prepended to bash output so env state is visible
+    in every tool result."""
+    if not active or not active.get("path"):
+        return "[no active env]\n"
+    return f"[active env: {active['path']}]\n"
+
+
 def _execute_tool_readonly(name, args, task_dir):
     try:
         if name == "bash":
+            active = _load_active_env(task_dir)
+            env = os.environ.copy()
+            env.update(_build_active_env_vars(active))
             r = subprocess.run(_prepare_bash(args["command"], task_dir),
-                shell=True, capture_output=True,
+                shell=True, capture_output=True, env=env,
                 text=True, timeout=min(60, MAX_BASH_TIME), cwd=task_dir)
             out = (r.stdout + r.stderr).strip()
-            return _truncate(out) if out else "(no output)"
+            body = _truncate(out) if out else "(no output)"
+            return _active_env_header(active) + body
+        elif name == "list_shared_envs":
+            return _list_shared_envs()
+        elif name == "read_env_manifest":
+            ep = args.get("env_path", "")
+            m = _read_env_manifest(ep)
+            return json.dumps(m, indent=2) if m else f"(no manifest for {ep})"
         elif name == "read_file":
             return _read_file_impl(args, task_dir)
         elif name == "memory_read":
@@ -1468,11 +1793,51 @@ def _execute_tool(name, args, task_dir, node, scheduler):
             default_t = 600 if bt == -1 else 30
             agent_t = int(args.get("timeout", default_t) or default_t)
             timeout = agent_t if bt == -1 else min(agent_t, bt)
+            active = _load_active_env(task_dir)
+            env = os.environ.copy()
+            env.update(_build_active_env_vars(active))
             r = subprocess.run(_prepare_bash(args["command"], task_dir),
-                shell=True, capture_output=True,
+                shell=True, capture_output=True, env=env,
                 text=True, timeout=timeout, cwd=task_dir)
             out = (r.stdout + r.stderr).strip()
-            return _truncate(out) if out else "(no output)"
+            body = _truncate(out) if out else "(no output)"
+            return _active_env_header(active) + body
+        elif name == "list_shared_envs":
+            return _list_shared_envs()
+        elif name == "read_env_manifest":
+            ep = args.get("env_path", "")
+            m = _read_env_manifest(ep)
+            return json.dumps(m, indent=2) if m else f"(no manifest for {ep})"
+        elif name == "activate_env":
+            ep = args.get("env_path", "").rstrip("/")
+            ok, payload = _activate_env(ep)
+            if not ok:
+                return payload  # error string
+            manifest = payload or {}
+            data = {"path": ep, "manifest": manifest}
+            _save_active_env(task_dir, data)
+            # Build a confirmation showing what was activated
+            overrides = _build_active_env_vars(data)
+            lines = [f"OK: activated env: {ep}"]
+            if manifest.get("purpose"):
+                lines.append(f"purpose: {manifest['purpose']}")
+            aliases = manifest.get("aliases") or {}
+            if aliases:
+                lines.append("aliases (now exported in every bash call):")
+                for k in sorted(aliases):
+                    lines.append(f"  {k} = {overrides.get(k, aliases[k])}")
+            notes = manifest.get("notes")
+            if notes:
+                if isinstance(notes, list):
+                    lines.append("notes:")
+                    for n in notes:
+                        lines.append(f"  - {n}")
+                elif isinstance(notes, str):
+                    lines.append(f"notes: {notes}")
+            lines.append("PATH and LD_LIBRARY_PATH now have the env's "
+                         "bin/lib prepended for every bash call. Use bare "
+                         "commands (python3, verilator, make, ...).")
+            return "\n".join(lines)
         elif name == "read_file":
             return _read_file_impl(args, task_dir)
         elif name == "write_file":
@@ -1566,6 +1931,11 @@ def _run_agent_loop(system, tools, execute_fn, task_dir, user_msg,
         {"role": "user", "content": user_msg},
     ]
     for i in range(max_iter):
+        if _WALL_EXCEEDED.is_set():
+            _history(task_dir, f"{label}_TOTAL_WALL_LIMIT", depth, iter=i)
+            if capture_messages is not None:
+                capture_messages.extend(messages)
+            return None
         try:
             response = _api_call(client, model, messages, tools)
         except Exception as e:
@@ -1604,6 +1974,11 @@ def _run_agent_loop(system, tools, execute_fn, task_dir, user_msg,
     # everything the agent observed, make ONE final forced call: terminal
     # tool only, explicit instruction to commit now based on current
     # observations. Extracts partial work instead of discarding it.
+    # Skip if total wall has fired — don't burn another LLM call past the cap.
+    if _WALL_EXCEEDED.is_set():
+        if capture_messages is not None:
+            capture_messages.extend(messages)
+        return None
     try:
         terminal_only = [t for t in tools
                          if t.get("function", {}).get("name") == terminal_tool]
@@ -1753,6 +2128,11 @@ def review_sam(task_dir, node, scheduler, case, expect_section="",
     """case='done': verify expectations. case='failed': decide recovery.
     Pauses siblings before reviewing. Uses control_model if set, else highest."""
     prefix = "  " * depth
+    if _WALL_EXCEEDED.is_set():
+        _history(task_dir, "REVIEW_SKIPPED_TOTAL_WALL", depth, case=case)
+        if case == "done":
+            return {"verdict": False, "feedback": "Skipped: total wall exceeded"}
+        return {"action": "reflect", "reason": "Total wall exceeded"}
     model = _resolve_control_model(control_model)
 
     # Auto-generate env.sh if worker created local env but forgot to write it.
@@ -1795,7 +2175,7 @@ def review_sam(task_dir, node, scheduler, case, expect_section="",
                     "Check whether the worker hit 30s timeouts and suggest using "
                     "large timeouts in your feedback.\n")
             user_msg = (
-                f"Worker hit MAX_ITERATIONS.\n\n"
+                f"Worker hit MAX_ITERATIONS_WORK.\n\n"
                 f"Task: {node.task_file}\n"
                 f"Current rank: {node.rank}, model: {node.model}\n"
                 f"{thinking_status}{bash_note}\n"
@@ -1816,15 +2196,12 @@ def review_sam(task_dir, node, scheduler, case, expect_section="",
                                     force_model=model)
         else:
             review_prompt = REVIEW_SYSTEM_SIMPLE if node.rank <= 0 else REVIEW_SYSTEM
-            # Adaptive iter budget: done-case reviews whose Expect references
-            # verification-like artifacts burn iters re-running build/test
-            # commands — give them more room so they don't drop to fallback.
-            iter_cap = MAX_REVIEW_ITER
-            if case == "done" and expect_section:
-                low = expect_section.lower()
-                if any(k in low for k in ("verify", "test", "pass",
-                        "contain", "log", "compile", "build", "output")):
-                    iter_cap = max(MAX_REVIEW_ITER, MAX_REVIEW_ITER_VERIFY)
+            # Iter cap by case (each independent — no global flooring):
+            #   done   → standalone verification, may run build/test → wider budget
+            #   failed → diagnose root cause + decide delay/retry/reflect from
+            #            .history tail + .memory + task spec → tight budget
+            iter_cap = (MAX_ITERATIONS_REVIEW_DONE if case == "done"
+                        else MAX_ITERATIONS_REVIEW_FAIL)
             # Capture primary's message history so a lateral reviewer (Fix D)
             # can inherit raw observations if the primary fails to commit.
             primary_messages = []
@@ -1902,6 +2279,10 @@ def review_sam(task_dir, node, scheduler, case, expect_section="",
 
 def reflect_sam(task_dir, task_file, exit_reason, depth=0, control_model=None):
     prefix = "  " * depth
+    if _WALL_EXCEEDED.is_set():
+        _history(task_dir, "REFLECT_SKIPPED_TOTAL_WALL", depth, reason=exit_reason)
+        return {"cause": "wall", "evidence": "Total wall exceeded before reflect",
+                "suggestion": "Re-run with larger TOTAL_WALL_PER_RANK"}
     model = _resolve_control_model(control_model)
     _history(task_dir, "REFLECT_START", depth, model=model, reason=exit_reason)
     print(f"{prefix}[reflect] diagnosing with {model}...", flush=True)
@@ -1911,7 +2292,7 @@ def reflect_sam(task_dir, task_file, exit_reason, depth=0, control_model=None):
         f"SAM `{task_file}` failed.\nReason: {exit_reason}\n\n"
         f"Files: .history.md, .memory.md, {task_file}, {DRIVER_PATH}\n\n"
         f"Diagnose, update memory, call `diagnosis`.",
-        MAX_REFLECT_ITER, "diagnosis", model, "REFLECT", depth)
+        MAX_ITERATIONS_REFLECT, "diagnosis", model, "REFLECT", depth)
 
     if args is None:
         _history(task_dir, "REFLECT_TIMEOUT", depth)
@@ -2067,6 +2448,8 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
     # Always injected, independent of NoMemory (this is run-scoped, not
     # cross-task). The review agent writes specific, actionable hints here
     # when rejecting a done claim or routing a failed-loop retry.
+    # Appended at the bottom (after task + memory + taskgroup). Prepending
+    # at the top was tested (X3/X4 ablation) and regressed pass rate.
     feedback = _read_feedback(task_dir, task_file)
     if feedback:
         user_msg += (
@@ -2077,13 +2460,18 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             f"{feedback[:CAP_MEMORY]}")
 
     # Iteration cap is global (rank no longer scales it); per-rank total wall stays.
-    max_iter = MAX_ITER
+    # Iter cap: dynamic (prescan-suggested, clamped to [5, MAX_ITERATIONS_WORK]) when
+    # DYNAMIC_MAX_ITER=1 and plan supplied a value; otherwise fixed at MAX_ITERATIONS_WORK.
+    suggested = plan.get("suggested_max_iter")
+    if DYNAMIC_MAX_ITER and isinstance(suggested, (int, float)) and suggested > 0:
+        max_iter = max(5, min(int(suggested), MAX_ITERATIONS_WORK))
+    else:
+        max_iter = MAX_ITERATIONS_WORK
+    # Total wall (incl. bash) is always enforced — it's the hard safety cap
+    # against runaway tasks. BashTime: -1 only relaxes the per-bash-call cap,
+    # NOT this clock-time bound. Use TOTAL_WALL_PER_RANK (or per-task overrides)
+    # to size it appropriately for long workloads.
     total_wall = _total_wall_for_rank(plan["rank"])
-
-    # BashTime: -1 means the user explicitly opts in to long bash calls.
-    # Disable total wall (no hard cut).
-    if node.bash_time == -1:
-        total_wall = 0  # disabled
 
     # --- Soft environment hints ---
     # Metadata controls the outer system (hard). These hints tell the agent
@@ -2164,6 +2552,12 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
     consecutive_nudges = 0   # detect models that can't use tools
     consecutive_errors = 0   # detect models with persistent API errors
     wall_start = time.time()
+    # Per-TASK total-wall start: sticky across retries. The first call to
+    # _run_sam for this node sets it; subsequent recursive retries inherit it
+    # so TOTAL_WALL_PER_RANK is enforced as a hard per-task budget, not per-SAM.
+    if not hasattr(node, '_task_wall_start'):
+        node._task_wall_start = wall_start
+    _ensure_wall_watchdog(node._task_wall_start, total_wall)
     excluded_time = 0.0  # subagent + tool time (excluded from wall limit)
     READONLY_TOOLS = {"read_file", "memory_read", "compact"}
 
@@ -2180,10 +2574,15 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             break
 
         # --- TOTAL WALL LIMIT (including bash/tool time) ---
-        if total_wall and (time.time() - wall_start) > total_wall:
+        # Sticky across retries via node._task_wall_start — full task-lifetime
+        # cap, not just current SAM attempt. Also enforced process-wide by the
+        # watchdog (_WALL_EXCEEDED set at cap, hard exit at cap + grace) so
+        # review/retry/reflect paths can't overshoot.
+        if _WALL_EXCEEDED.is_set() or (
+                total_wall and (time.time() - node._task_wall_start) > total_wall):
             _history(task_dir, "TOTAL_WALL_LIMIT", depth,
-                total_time=time.time()-wall_start, limit=total_wall)
-            print(f"{prefix}[total wall limit] {time.time()-wall_start:.0f}s > {total_wall}s",
+                total_time=time.time()-node._task_wall_start, limit=total_wall)
+            print(f"{prefix}[total wall limit] {time.time()-node._task_wall_start:.0f}s > {total_wall}s",
                   flush=True)
             break
 
@@ -2324,20 +2723,20 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
                     else:
                         review_failures += 1
                         _history(task_dir, "REVIEW_REJECTED", depth,
-                            attempt=f"{review_failures}/{MAX_RETRIES}",
+                            attempt=f"{review_failures}/{MAX_RETRIES_REJECTED}",
                             feedback=rv["feedback"])
                         print(f"{prefix}[rejected] {rv['feedback']}", flush=True)
                         # Persist the reviewer's concrete observations so any
                         # future retry of this subtask (including after loop
                         # exhaustion and full _run_sam restart) sees them.
                         _append_feedback(task_dir, task_file,
-                            f"DONE-CLAIM REJECTED (attempt {review_failures}/{MAX_RETRIES})\n"
+                            f"DONE-CLAIM REJECTED (attempt {review_failures}/{MAX_RETRIES_REJECTED})\n"
                             f"Worker summary: {summary[:500]}\n"
                             f"Reviewer findings:\n{rv['feedback']}")
-                        if review_failures >= MAX_RETRIES:
+                        if review_failures >= MAX_RETRIES_REJECTED:
                             _history(task_dir, "MAX_REVIEW_FAILURES", depth)
                             diag = reflect_sam(task_dir, task_file,
-                                f"Review failed {MAX_RETRIES}x. Last: {rv['feedback']}",
+                                f"Review failed {MAX_RETRIES_REJECTED}x. Last: {rv['feedback']}",
                                 depth, control_model=control_model)
                             return (f"UNVERIFIED: {summary}\n"
                                 f"REFLECTION: [{diag['cause']}] {diag['suggestion']}")
@@ -2386,16 +2785,26 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         if iter_has_mutation:
             effective_iter += 1
 
-    # --- MAX_ITERATIONS or WALL_LIMIT: review decides recovery ---
+    # --- TOTAL WALL EXCEEDED: skip review/retry/reflect entirely ---
+    # If the watchdog has fired, do NOT enter recovery — review_sam and
+    # reflect_sam would otherwise burn through the +grace window. Return a
+    # partial UNVERIFIED result and let the post-task path wrap up quickly
+    # (or be hard-killed by the watchdog after WRAP_UP_GRACE_S).
+    if _WALL_EXCEEDED.is_set():
+        memory = _read_memory(task_dir)
+        return (f"UNVERIFIED: TOTAL_WALL_LIMIT exceeded.\n"
+                f"Memory: {memory[:300]}")
+
+    # --- MAX_ITERATIONS_WORK or WALL_LIMIT: review decides recovery ---
     _history(task_dir, "LOOP_EXHAUSTED", depth)
     rv = review_sam(task_dir, node, scheduler, "failed", depth=depth,
                     control_model=control_model)
 
-    # MAX_RECOVERY (env-tunable, default 3): cap on delay/retry rounds after
+    # MAX_RETRIES_EXHAUSTED (env-tunable, default 3): cap on delay/retry rounds after
     # LOOP_EXHAUSTED to prevent infinite recursion. See module-level definition.
     recovery_count = getattr(node, '_recovery_count', 0)
 
-    if rv.get("action") == "delay" and recovery_count < MAX_RECOVERY:
+    if rv.get("action") == "delay" and recovery_count < MAX_RETRIES_EXHAUSTED:
         node._recovery_count = recovery_count + 1
         wait = rv.get("wait_seconds", 60)
         _history(task_dir, "DELAY_PAUSE", depth, wait=wait, reason=rv["reason"])
@@ -2406,7 +2815,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         _history(task_dir, "DELAY_RESUME", depth)
         return _run_sam(node, context, wall_limit, control_model=control_model)
 
-    elif rv.get("action") == "retry" and recovery_count < MAX_RECOVERY:
+    elif rv.get("action") == "retry" and recovery_count < MAX_RETRIES_EXHAUSTED:
         node._recovery_count = recovery_count + 1
         if rv.get("memory_update"):
             with _get_mem_lock(task_dir):
@@ -2417,7 +2826,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         hint_text = rv.get("memory_update") or rv.get("reason", "")
         if hint_text:
             _append_feedback(task_dir, task_file,
-                f"LOOP-EXHAUSTED RETRY (recovery {node._recovery_count}/{MAX_RECOVERY})\n"
+                f"LOOP-EXHAUSTED RETRY (recovery {node._recovery_count}/{MAX_RETRIES_EXHAUSTED})\n"
                 f"Reviewer reason: {rv.get('reason', '')}\n"
                 f"Reviewer hints for next attempt:\n{hint_text}")
         # Model selection: escalate rank OR exclude current, not both.
@@ -2469,7 +2878,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             f"Loop exhausted + review chose reflect: {rv['reason']}", depth,
             control_model=reflect_cm)
         memory = _read_memory(task_dir)
-        return (f"MAX_ITERATIONS ({max_iter}) reached.\n"
+        return (f"MAX_ITERATIONS_WORK ({max_iter}) reached.\n"
             f"Memory: {memory[:300]}\n"
             f"REFLECTION: [{diag['cause']}] {diag['suggestion']}")
 
@@ -2505,6 +2914,8 @@ def run_sam(task_dir, task_file="top.md", depth=0):
 def index_history(task_dir):
     """Use rank -1 model to summarize .history.md into .history_index.md.
     Overwrites the index each time. Cheap, no tools, pure text."""
+    if _WALL_EXCEEDED.is_set():
+        return
     hf = os.path.join(task_dir, ".history.md")
     if not os.path.exists(hf):
         return
@@ -2555,6 +2966,9 @@ def final_review(task_dir, task_file, result, elapsed, iterations, final_rank, f
     """Post-task reflection: review task design + system feedback.
     Writes .suggestion.md, prints conclusion + task suggestions to user.
     Does NOT retry or re-run anything. Pure reflection."""
+    if _WALL_EXCEEDED.is_set():
+        print(f"[final review] skipped (TOTAL_WALL_LIMIT exceeded)", flush=True)
+        return
     # Gather context
     top_path = os.path.join(task_dir, task_file)
     idx_path = os.path.join(task_dir, ".history_index.md")
@@ -2575,14 +2989,14 @@ def final_review(task_dir, task_file, result, elapsed, iterations, final_rank, f
         with open(mem_path) as f:
             memory = f.read()[:CAP_MEMORY]
 
-    success = not result.startswith(("MAX_ITERATIONS", "UNVERIFIED"))
+    success = not result.startswith(("MAX_ITERATIONS_WORK", "UNVERIFIED"))
 
     # Use control model if set, else highest (same as review — quality judgment)
     model = _resolve_control_model(control_model)
 
     # Per-task system stats: what limits applied + what actually happened.
     # Gives final_review factual context to write sharp System suggestions.
-    max_iter_limit = MAX_ITER
+    max_iter_limit = MAX_ITERATIONS_WORK
     total_wall_limit = _total_wall_for_rank(final_rank)
     history_raw = ""
     hf = os.path.join(task_dir, ".history.md")
@@ -2748,7 +3162,7 @@ if __name__ == "__main__":
     result, final_rank, final_model, cm, no_memory, task_group = run_sam(task_dir, task_file)
 
     elapsed = time.time() - t0
-    success = not result.startswith(("MAX_ITERATIONS", "UNVERIFIED"))
+    success = not result.startswith(("MAX_ITERATIONS_WORK", "UNVERIFIED"))
     hf = os.path.join(task_dir, ".history.md")
     iterations = 0
     if os.path.exists(hf):

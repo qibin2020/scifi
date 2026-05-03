@@ -168,7 +168,9 @@ Chat with `SciFi` to explore the system (e.g. `task maker` and `skill maker`), o
 | `FALLBACK_HIGHEST`, `FALLBACK_WORKING` | Fallback model groups when rank config is unavailable |
 | `SCIFI_MODEL` | Model group for the SciFi natural language interface |
 | `DEFAULT_ENV_SKILL` | Env skill auto-injected when a task declares none (`temp_env` / `local_env` / `common_env`) |
-| `MAX_ITERATIONS`, `MAX_DEPTH`, `MAX_RETRIES` | Agent loop limits |
+| `MAX_ITERATIONS_WORK`, `MAX_ITERATIONS_REVIEW_DONE`, `MAX_ITERATIONS_REVIEW_FAIL`, `MAX_ITERATIONS_REFLECT` | Per-agent iter caps |
+| `MAX_RETRIES_REJECTED`, `MAX_RETRIES_EXHAUSTED` | Per-path retry caps (done-rejection within SAM, LOOP_EXHAUSTED across SAMs) |
+| `MAX_DEPTH` | Max subtask nesting |
 | `TOTAL_WALL_PER_RANK` | Hard wall-clock cap per rank (includes bash time) |
 | `MAX_EVOLVE_ITER` | Evolution loop limit |
 
