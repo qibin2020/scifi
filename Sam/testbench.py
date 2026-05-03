@@ -556,7 +556,7 @@ def parse_log(log: Path) -> RunResult:
     # Cap trips
     caps = {
         "WALL": len(re.findall(r'\[wall limit\] exceeded|WALL_LIMIT', text)),
-        "ITER": len(re.findall(r'MAX_ITERATIONS \(\d+\) reached|LOOP_EXHAUSTED', text)),
+        "ITER": len(re.findall(r'MAX_ITERATIONS_WORK \(\d+\) reached|LOOP_EXHAUSTED', text)),
         "TOTAL": len(re.findall(r'\[total wall limit\]|TOTAL_WALL_LIMIT', text)),
     }
 

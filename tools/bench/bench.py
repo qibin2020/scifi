@@ -69,10 +69,18 @@ def gateway_url():
     return f"http://127.0.0.1:{port}"
 
 
-def post_chat(prompt, max_tokens=8, timeout=60):
-    """One LiteLLM chat-completion call. Returns (status, response_ms_client, headers, body)."""
+def post_chat(prompt, max_tokens=8, timeout=60, model=None):
+    """One LiteLLM chat-completion call. Returns (status, response_ms_client, headers, body).
+
+    `model` defaults to the env var BENCH_PROBE_MODEL (set by main() from plan's
+    lock_model when present), else "gemma4". Probing the actual locked model
+    matters because deepseek-v4-pro vs deepseek-v4-flash-off vs gemma4 have
+    very different TPS/concurrency characteristics on the same gateway.
+    """
+    if model is None:
+        model = os.environ.get("BENCH_PROBE_MODEL", "gemma4")
     payload = json.dumps({
-        "model": "gemma4",
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0,
@@ -237,9 +245,13 @@ def lock_model(model_name):
     matching = [r for r, n in active if n == model_name]
     if not matching:
         # Try commented-out entries too, so plans can re-enable a known model
+        # NOTE: \b after escaped name is unsafe — '-' is a word boundary in
+        # regex, so 'deepseek-v4-pro\b' would match 'deepseek-v4-pro-on'.
+        # Require the next char be whitespace, '#' (start of inline comment),
+        # or end-of-line, so the name terminates cleanly.
         commented = re.findall(
             r"^[ \t]*#[ \t]*-[ \t]*rank:[ \t]*(-?\d+)[ \t]*\n[ \t]*#[ \t]*name:[ \t]*"
-            + re.escape(model_name) + r"\b",
+            + re.escape(model_name) + r"[ \t]*(?:#|$)",
             content, re.MULTILINE,
         )
         if not commented:
@@ -300,38 +312,93 @@ def set_total_wall(seconds, existing_backup=None):
     return bak
 
 
-def set_max_retries(n, existing_backup=None):
-    """Override ENV.sh's MAX_RETRIES to <n>.
+def set_env_knob(name, value, existing_backup=None, expect_export=True):
+    """Generic ENV.sh writer. Adds the export line if it doesn't exist (helps
+    for knobs that are only commented-out / driver-defaulted)."""
+    env_path = os.path.join(BASEDIR, "ENV.sh")
+    if not os.path.isfile(env_path):
+        raise SystemExit(f"ERROR: {env_path} not found")
+    content = open(env_path).read()
+    new_value = str(value)
+    pat = re.compile(rf"^export {re.escape(name)}=(\S+)", re.MULTILINE)
+    m = pat.search(content)
+    if m:
+        old_value = m.group(1)
+        print(f"[{name}] requested: {value}")
+        print(f"[{name}] currently in ENV.sh: {old_value}")
+        if old_value == new_value:
+            print(f"[{name}] already set — no change.")
+            return None
+        bak = existing_backup or _backup(env_path)
+        new_content = pat.sub(f"export {name}={new_value}", content, count=1)
+    else:
+        if expect_export:
+            print(f"[{name}] not in ENV.sh — appending")
+        bak = existing_backup or _backup(env_path)
+        new_content = content.rstrip() + f"\nexport {name}={new_value}  # bench knob\n"
+    open(env_path, "w").write(new_content)
+    print(f"[{name}] WROTE: {env_path}  ({m.group(1) if m else '(absent)'} → {new_value})")
+    print(f"[{name}] backup: {os.path.basename(bak)}")
+    return bak
 
-    Same pattern as set_total_wall. If `existing_backup` is given (because
-    another override already backed up ENV.sh), reuse it instead of taking a
-    second backup that would shadow the original.
-    """
+
+def set_checkpoint_every(n, existing_backup=None):
+    """Override ENV.sh's CHECKPOINT_EVERY to <n>. Same backup-share pattern."""
     env_path = os.path.join(BASEDIR, "ENV.sh")
     if not os.path.isfile(env_path):
         raise SystemExit(f"ERROR: {env_path} not found")
     content = open(env_path).read()
 
     new_value = str(int(n))
-    m = re.search(r"^export MAX_RETRIES=(\S+)", content, re.MULTILINE)
+    m = re.search(r"^export CHECKPOINT_EVERY=(\S+)", content, re.MULTILINE)
     if not m:
-        raise SystemExit("ERROR: 'export MAX_RETRIES=...' not found in ENV.sh")
+        raise SystemExit("ERROR: 'export CHECKPOINT_EVERY=...' not found in ENV.sh")
     old_value = m.group(1)
-    print(f"[max_retries] requested: {n}")
-    print(f"[max_retries] currently in ENV.sh: {old_value}")
+    print(f"[checkpoint_every] requested: {n}")
+    print(f"[checkpoint_every] currently in ENV.sh: {old_value}")
     if old_value == new_value:
-        print(f"[max_retries] already set — no change.")
-        return None  # caller's `env_bak = ... or env_bak` keeps any prior backup
+        print(f"[checkpoint_every] already set — no change.")
+        return None
 
     bak = existing_backup or _backup(env_path)
     new_content = re.sub(
-        r"^(export MAX_RETRIES=)\S+",
+        r"^(export CHECKPOINT_EVERY=)\S+",
         rf"\g<1>{new_value}",
         content, count=1, flags=re.MULTILINE,
     )
     open(env_path, "w").write(new_content)
-    print(f"[max_retries] WROTE: {env_path}  ({old_value} → {new_value})")
-    print(f"[max_retries] backup: {os.path.basename(bak)}")
+    print(f"[checkpoint_every] WROTE: {env_path}  ({old_value} → {new_value})")
+    print(f"[checkpoint_every] backup: {os.path.basename(bak)}")
+    return bak
+
+
+def set_max_iterations_work(n, existing_backup=None):
+    """Override ENV.sh's MAX_ITERATIONS_WORK to <n>. Same backup-share pattern."""
+    env_path = os.path.join(BASEDIR, "ENV.sh")
+    if not os.path.isfile(env_path):
+        raise SystemExit(f"ERROR: {env_path} not found")
+    content = open(env_path).read()
+
+    new_value = str(int(n))
+    m = re.search(r"^export MAX_ITERATIONS_WORK=(\S+)", content, re.MULTILINE)
+    if not m:
+        raise SystemExit("ERROR: 'export MAX_ITERATIONS_WORK=...' not found in ENV.sh")
+    old_value = m.group(1)
+    print(f"[max_iterations_work] requested: {n}")
+    print(f"[max_iterations_work] currently in ENV.sh: {old_value}")
+    if old_value == new_value:
+        print(f"[max_iterations_work] already set — no change.")
+        return None
+
+    bak = existing_backup or _backup(env_path)
+    new_content = re.sub(
+        r"^(export MAX_ITERATIONS_WORK=)\S+",
+        rf"\g<1>{new_value}",
+        content, count=1, flags=re.MULTILINE,
+    )
+    open(env_path, "w").write(new_content)
+    print(f"[max_iterations_work] WROTE: {env_path}  ({old_value} → {new_value})")
+    print(f"[max_iterations_work] backup: {os.path.basename(bak)}")
     return bak
 
 
@@ -440,12 +507,65 @@ def run_one(label, idx, task):
     return meta
 
 
+def _have_local_gpu():
+    """True if nvidia-smi reports at least one GPU."""
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True,
+                             text=True, timeout=10)
+        return out.returncode == 0 and "GPU" in (out.stdout or "")
+    except Exception:
+        return False
+
+
+def _have_slurm():
+    """True if sbatch is on PATH."""
+    return shutil.which("sbatch") is not None
+
+
+def _task_skip_reason(task):
+    """Return string explaining why this task should be skipped on this host,
+    or None if it can run. Reads task metadata; capability-based."""
+    task_dir = os.path.join(BASEDIR, "Sam", "tasks", task)
+    top = os.path.join(task_dir, "top.md")
+    if not os.path.isfile(top):
+        return f"task .md not found: {top}"
+    # Cheap frontmatter parse: GPU and Slurm keys.
+    meta = {}
+    with open(top) as f:
+        in_fm = False
+        for line in f:
+            if line.strip() == "---":
+                if in_fm: break
+                in_fm = True
+                continue
+            if in_fm and ":" in line:
+                k, _, v = line.partition(":")
+                meta[k.strip()] = v.strip()
+    gpu = meta.get("GPU", "no").lower()
+    slurm = meta.get("Slurm", "off").lower()
+    if gpu == "slurm":
+        slurm = "on"
+    if gpu == "local" and not _have_local_gpu():
+        return "GPU: local but no nvidia-smi"
+    if gpu in ("1", "2", "3", "4", "all") and not _have_local_gpu():
+        return f"GPU: {gpu} but no nvidia-smi"
+    if slurm == "on" and not _have_slurm():
+        return "Slurm: on but no sbatch on PATH"
+    return None
+
+
 def launch_batch(batch):
-    """Run N copies (parallel or sequential, with stagger between launches)."""
+    """Run N copies (parallel or sequential, with stagger between launches).
+    Skip the batch if the task requires hardware (GPU/SLURM) not available
+    on this host."""
     label    = batch["name"]
     n        = int(batch.get("n", 1))
     parallel = int(batch.get("parallel", 1))
     task     = batch["task"]
+    skip = _task_skip_reason(task)
+    if skip:
+        print(f"[batch] {label}: SKIP — {skip}")
+        return
     print(f"[batch] {label}: launching n={n} parallel={parallel} task={task}")
 
     if parallel <= 1:
@@ -475,9 +595,20 @@ def validate_plan(plan):
     if "total_wall_s" in plan:
         if not isinstance(plan["total_wall_s"], int) or plan["total_wall_s"] < 60:
             raise SystemExit("'total_wall_s' must be an int >= 60")
-    if "max_retries" in plan:
-        if not isinstance(plan["max_retries"], int) or plan["max_retries"] < 1:
-            raise SystemExit("'max_retries' must be a positive int")
+    if "max_iterations_work" in plan:
+        if not isinstance(plan["max_iterations_work"], int) or plan["max_iterations_work"] < 1:
+            raise SystemExit("'max_iterations_work' must be a positive int")
+    if "checkpoint_every" in plan:
+        if not isinstance(plan["checkpoint_every"], int) or plan["checkpoint_every"] < 1:
+            raise SystemExit("'checkpoint_every' must be a positive int")
+    for knob in ("tool_result_cap",
+                  "max_iterations_review_done", "max_iterations_review_fail",
+                  "max_iterations_reflect",
+                  "max_retries_rejected", "max_retries_exhausted",
+                  "error_limit", "nudge_limit"):
+        if knob in plan:
+            if not isinstance(plan[knob], int) or plan[knob] < 1:
+                raise SystemExit(f"'{knob}' must be a positive int")
     # Pins from prior bench runs (cp -al snapshots in STATES_DIR) are also
     # accepted — lets a plan reuse a warm pin without redoing bootstrap.
     existing_pins = set(os.listdir(STATES_DIR)) if os.path.isdir(STATES_DIR) else set()
@@ -524,13 +655,31 @@ def main():
         b = lock_model(plan["lock_model"])
         if b:
             backups[os.path.join(BASEDIR, "Pam", "gateway.rank.yaml")] = b
-    # ENV.sh may be modified by both total_wall_s and max_retries. Share one
-    # backup so the second override doesn't shadow the first.
+        # Make probes hit the locked model, not always gemma4. Each plan's
+        # initial + inter-batch probes then reflect the actual model under test.
+        os.environ["BENCH_PROBE_MODEL"] = plan["lock_model"]
+        print(f"[probe-model] probes will use: {plan['lock_model']}")
+    # ENV.sh may be modified by multiple knobs. Share one backup so a second
+    # override doesn't shadow the first.
     env_bak = None
     if "total_wall_s" in plan:
         env_bak = set_total_wall(plan["total_wall_s"], env_bak) or env_bak
-    if "max_retries" in plan:
-        env_bak = set_max_retries(plan["max_retries"], env_bak) or env_bak
+    if "max_iterations_work" in plan:
+        env_bak = set_max_iterations_work(plan["max_iterations_work"], env_bak) or env_bak
+    if "checkpoint_every" in plan:
+        env_bak = set_checkpoint_every(plan["checkpoint_every"], env_bak) or env_bak
+    for knob_name, env_name in [
+            ("max_iterations_review_done", "MAX_ITERATIONS_REVIEW_DONE"),
+            ("max_iterations_review_fail", "MAX_ITERATIONS_REVIEW_FAIL"),
+            ("max_iterations_reflect",     "MAX_ITERATIONS_REFLECT"),
+            ("max_retries_rejected",       "MAX_RETRIES_REJECTED"),
+            ("max_retries_exhausted",      "MAX_RETRIES_EXHAUSTED"),
+            ("tool_result_cap",            "TOOL_RESULT_CAP"),
+            ("error_limit",                "ERROR_LIMIT"),
+            ("nudge_limit",                "NUDGE_LIMIT"),
+    ]:
+        if knob_name in plan:
+            env_bak = set_env_knob(env_name, plan[knob_name], env_bak) or env_bak
     if env_bak:
         backups[os.path.join(BASEDIR, "ENV.sh")] = env_bak
 
@@ -557,7 +706,18 @@ def main():
             print(f"[batch] {batch['name']}: attributing cam logs …")
             time.sleep(2)  # tiny grace for kernel flush
             attribute.attribute(batch["name"], verbose=True)
-            batch_results.append(attribute.summarize(batch))
+            summary = attribute.summarize(batch)
+            batch_results.append(summary)
+            # Early-stop: if this batch declares abort_if_no_pass and produced
+            # zero PASSes, skip remaining batches in the plan. Honors the
+            # principle "draw conclusion in the time scale" — wave 2 of a
+            # model that just went 0/N is unlikely to be discriminating.
+            if batch.get("abort_if_no_pass") and summary.get("n_pass", 0) == 0 \
+                    and summary.get("n_runs", 0) > 0:
+                print(f"[abort] '{batch['name']}' produced 0/{summary['n_runs']} PASS "
+                      f"and abort_if_no_pass=true — skipping remaining batches",
+                      flush=True)
+                break
             if batch.get("pin"):
                 print(f"[state] pinning current state as '{batch['pin']}' (hardlink-clone)")
                 state_pin(plan, batch["pin"])

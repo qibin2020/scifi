@@ -1,0 +1,46 @@
+{
+  "name": "full_test_all_20260502",
+  "state_paths": ["F/mnt"],
+  "lock_model": "gemma4",
+  "total_wall_s": 3600,
+  "max_iterations_work": 50,
+  "gateway_probe": {
+    "abort_below_tps": 4,
+    "abort_above_oh_ms": 200,
+    "abort_below_conc_ceiling": 1
+  },
+  "batches": [
+    {"name": "sys_hello",         "task": "system/hello",         "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_basic",         "task": "system/basic",         "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_edit_file",     "task": "system/edit_file",     "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_anti_inject",   "task": "system/anti_inject",   "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_nomem",         "task": "system/nomem",         "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_private_meta",  "task": "system/private_meta",  "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_bashtime",      "task": "system/bashtime",      "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_env_warm",      "task": "system/env_warm",      "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_env_cold_conda","task": "system/env_cold_conda","n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_env_cold_pip",  "task": "system/env_cold_pip",  "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_env_cold_cpp",  "task": "system/env_cold_cpp",  "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_env_common",    "task": "system/env_common",    "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_subtask",       "task": "system/subtask",       "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_medium",        "task": "system/medium",        "n": 3, "parallel": 5, "state": "fresh"},
+    {"name": "sys_gpu",           "task": "system/gpu",           "n": 3, "parallel": 5, "state": "fresh"},
+
+    {"name": "fw_bootstrap",      "task": "sci_study/fw_bootstrap","n":1, "parallel": 1, "state": "inherit", "pin": "warm"},
+    {"name": "fw_c1",             "task": "sci_study/fw_complete1","n":5, "parallel": 5, "state": "warm"},
+    {"name": "fw_c2",             "task": "sci_study/fw_complete2","n":5, "parallel": 5, "state": "warm"},
+    {"name": "fw_c3",             "task": "sci_study/fw_complete3","n":5, "parallel": 5, "state": "warm"},
+    {"name": "lhco",              "task": "sci_study/lhco_CWoLa_VAE_detailed","n":1, "parallel": 1, "state": "warm"},
+    {"name": "calo_vq_local",     "task": "sci_study/calo-vq_rep", "n":1, "parallel": 1, "state": "warm"},
+    {"name": "calo_vq_slurm",     "task": "sci_study/calo-vq_rep_refined","n":1,"parallel":1,"state":"warm"},
+
+    {"name": "sci_torch_smoke",   "task": "sci_bench/sci_torch_smoke",       "n":1,"parallel":1,"state":"warm"},
+    {"name": "sci_mnist_local",   "task": "sci_bench/sci_mnist_train_local", "n":1,"parallel":1,"state":"warm"},
+    {"name": "sci_mnist_multigpu","task": "sci_bench/sci_mnist_train_multigpu","n":1,"parallel":1,"state":"warm"},
+    {"name": "sci_chain_mnist",   "task": "sci_bench/sci_chain_mnist_full",  "n":1,"parallel":1,"state":"warm"},
+
+    {"name": "sci_slurm_hello",   "task": "sci_bench/sci_slurm_hello",       "n":1,"parallel":1,"state":"warm"},
+    {"name": "sci_slurm_gpu_mnist","task":"sci_bench/sci_slurm_gpu_mnist",   "n":1,"parallel":1,"state":"warm"},
+    {"name": "sci_chain_slurm",   "task": "sci_bench/sci_chain_slurm_train_eval","n":1,"parallel":1,"state":"warm"}
+  ]
+}
