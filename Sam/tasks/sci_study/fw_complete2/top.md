@@ -12,9 +12,7 @@ CommonStorage: rw
 
 I have an FPGA project under `sim/`. The outermost module `sim/src/stream_wrapper.v` is empty — just the module declaration and port list (those are locked to the binder, don't touch). The convolution kernel and dense layer submodules in `sim/src/` are done, the C++ binder is done, and there's a python verify script. I need you to write the entire body of `stream_wrapper.v` so the design passes verification.
 
-The toolchain (verilator, g++, make, python3 with numpy) is NOT pre-installed. Install it into a local micromamba env before building:
-    MAMBA_ROOT_PREFIX=./mamba_env micromamba create -n hgq -c conda-forge verilator gxx_linux-64 make "python>=3.10" numpy -y
-Then write env.sh to put it on PATH. The task directory is writable.
+The required toolchain is at **prefix** `/mnt/sci_envs/fpga_toolchain` with **env name** `hgq` (full path: `/mnt/sci_envs/fpga_toolchain/envs/hgq`). It contains verilator, g++, make, python3, numpy. Use the common_env skill to discover and activate it; if missing, create it there with the same prefix + env name. The task directory is writable.
 
 ## Todo
 

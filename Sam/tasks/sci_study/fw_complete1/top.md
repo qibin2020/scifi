@@ -14,9 +14,7 @@ I'm working on an FPGA Verilog project. Under `sim/` there's a Verilator testben
 
 Please complete `sim/src/stream_wrapper.v` so the design passes the verify script. The verify script has two modes — a normal one (`--no-pause`) and a harder one that randomly drops the input valid signal (`--inp-pause 0.3 --seed 42`). Both should pass. Don't touch any other files.
 
-The toolchain (verilator, g++, make, python3 with numpy) is NOT pre-installed. Install it into a local micromamba env before building:
-    MAMBA_ROOT_PREFIX=./mamba_env micromamba create -n hgq -c conda-forge verilator gxx_linux-64 make "python>=3.10" numpy -y
-Then write env.sh to put it on PATH. The task directory is writable.
+The required toolchain is at **prefix** `/mnt/sci_envs/fpga_toolchain` with **env name** `hgq` (full path: `/mnt/sci_envs/fpga_toolchain/envs/hgq`). It contains verilator, g++, make, python3, numpy. Use the common_env skill to discover and activate it; if missing, create it there with the same prefix + env name. The task directory is writable.
 
 ## Todo
 

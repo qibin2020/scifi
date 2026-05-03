@@ -19,7 +19,7 @@ The design is a streaming pipeline: the binder feeds 25 ten-bit values per clock
 
 The Makefile builds with `verilator -Wall`, so handle lint pragmas (`PROCASSINIT`, etc.) and trailing newlines.
 
-The toolchain (verilator, g++, make, python3 with numpy) is on PATH as bare commands. The task directory is writable.
+The required toolchain is at **prefix** `/mnt/sci_envs/fpga_toolchain` with **env name** `hgq` (full path: `/mnt/sci_envs/fpga_toolchain/envs/hgq`). It contains verilator, g++, make, python3, numpy. Use the common_env skill to discover and activate it; if missing, create it there with the same prefix + env name. The task directory is writable.
 
 ## Todo
 

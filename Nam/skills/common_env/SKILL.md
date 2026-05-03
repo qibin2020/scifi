@@ -17,52 +17,45 @@ benefit from cross-task reuse.
 - **Never** pip install into, conda install into, or otherwise modify an existing shared env
 - If an env exists but is missing something you need → create a **new** env with a different name
 
+## Two names — keep them straight
+
+Every shared env has TWO identifiers, and they are NOT the same:
+
+- **`<prefix>`** = a `MAMBA_ROOT_PREFIX` directory under `/mnt/sci_envs/`. Each
+  prefix is one *domain* (a category of related work, e.g. `fpga_toolchain`
+  for FPGA/Verilog work, `root` for CERN ROOT, `ml` for ML frameworks). It
+  holds an `envs/` folder, a `pkgs/` cache, and a `PURPOSE.md` manifest.
+- **`<env>`** = the actual env name *inside* a prefix. Lives at
+  `<prefix>/envs/<env>/bin/...`. One prefix can hold multiple envs.
+
+Full path of an env: `/mnt/sci_envs/<prefix>/envs/<env>/`.
+
+Pick `<prefix>` for the domain (rarely changes — pin it in the task spec).
+Pick `<env>` for the specific configuration within that domain.
+
+If the task spec gives you both names, use them verbatim — that's how
+sibling tasks reuse the env you're about to build.
+
 ## Step 1: Discover existing envs
 
-List what is already available:
-```bash
-ls /mnt/sci_envs/ 2>/dev/null || echo "NO SHARED ENVS"
-```
+Call the `list_shared_envs` tool. It enumerates `/mnt/sci_envs/` and prints
+each env's path plus a one-line `purpose` from the env's manifest. No bash
+probing needed.
 
-Each subdirectory under `/mnt/sci_envs/` is a MAMBA_ROOT_PREFIX. Env names
-live inside each prefix. To list envs in a prefix:
-```bash
-MAMBA_ROOT_PREFIX=/mnt/sci_envs/<prefix> micromamba env list 2>/dev/null
-```
+## Step 2: Inspect a candidate before activating
 
-## Step 2: Check if an existing env meets your needs
+For any env that looks plausible, call `read_env_manifest(env_path=...)`
+to see its full manifest: `purpose`, key `binaries`, `aliases` (e.g. `CXX`,
+`CC`), and free-form `notes` (quirks like which g++ wrapper to use).
 
-**First, read each prefix's `PURPOSE.md` if present.** This file is written
-by this skill at env-creation time and describes the env's intended domain
-and key packages. Prefer matches based on purpose over matches based on
-directory-name guesses:
-
-```bash
-for d in /mnt/sci_envs/*/; do
-    [ -f "$d/PURPOSE.md" ] && echo "=== $d ===" && cat "$d/PURPOSE.md"
-done
-```
-
-**Then consider env names** (useful as a fallback when `PURPOSE.md` is
-missing — older envs predate this convention). Each prefix describes a
-domain (e.g. `root` for ROOT, `fpga_toolchain` for Verilator/g++, `ml`
-for PyTorch).
-
-If a prefix's purpose or name matches your task, verify it actually has
-the packages you need:
-```bash
-MAMBA_ROOT_PREFIX=/mnt/sci_envs/<prefix> micromamba run -n <env> python -c "import <package>; print('OK')"
-```
-
-If verification passes → **use this env**. Skip install. Start your actual task.
-
-```bash
-MAMBA_ROOT_PREFIX=/mnt/sci_envs/<prefix> micromamba run -n <env> python your_script.py
-```
+Pick the env whose purpose matches your task. If multiple plausibly match,
+prefer the one whose `aliases`/`binaries` cover what your task needs.
 
 ## Step 3: If no suitable env found — create one
 
-Pick a descriptive prefix name for the domain (e.g. `root`, `ml`, `geo`, `astro`).
+If the task spec named a `<prefix>` and `<env>` — use those exactly. If not,
+pick a descriptive prefix name for the **domain** (e.g. `root`, `ml`, `geo`,
+`astro`) and an env name for the **specific configuration**.
 
 Check if `/mnt` is writable:
 ```bash
@@ -83,59 +76,52 @@ Verify after install:
 MAMBA_ROOT_PREFIX=/mnt/sci_envs/<prefix> micromamba run -n <env> python -c "import <package>; print('OK')"
 ```
 
-Once verification passes, **write a `PURPOSE.md` descriptor** at
-`/mnt/sci_envs/<prefix>/PURPOSE.md` so future tasks can discover and reuse
-this env instead of creating a near-duplicate. Keep it plain and short:
+Once verification passes, **write a `.manifest.json`** at the env root
+`/mnt/sci_envs/<prefix>/envs/<env>/.manifest.json` so future tasks (and
+list_shared_envs) can discover and reuse this env. Use write_file with:
 
-```bash
-cat > /mnt/sci_envs/<prefix>/PURPOSE.md << 'EOF'
-# <one-line purpose, e.g. "Verilator + g++ FPGA simulation toolchain">
-
-## Packages
-- <key package 1>
-- <key package 2>
-- ...
-
-## Created by
-task: <group/task_name>
-date: <YYYY-MM-DD>
-EOF
+```json
+{
+  "purpose": "<one-line summary, e.g. Verilator + g++ FPGA simulation toolchain>",
+  "binaries": {
+    "python": "bin/python3",
+    "<other key tool>": "bin/<exec>"
+  },
+  "aliases": {
+    "CXX": "bin/<conda-wrapper-c++>",
+    "CC":  "bin/<conda-wrapper-cc>"
+  },
+  "notes": [
+    "<concrete tip, e.g. use $CXX in build scripts; conda's wrapper differs from /usr/bin/g++>",
+    "<another quirk worth flagging>"
+  ]
+}
 ```
 
-Do NOT list every transitive dependency — only the packages a caller would
-search for. The point is matchability, not a manifest.
+`aliases` are the most important field: they get exported as env vars on
+every bash call, so build scripts that reference `$CXX` / `$CC` Just Work
+without the agent having to discover the right wrapper name.
 
 **If read-only** — fall back to a local env in the task directory:
 ```bash
 MAMBA_ROOT_PREFIX=./env micromamba create -n <env> -c conda-forge <packages> -y
 ```
 
-## Step 4: Generate env.sh
+## Step 4: Activate the env
 
-After discovering or creating an env, write `env.sh` so all bash commands
-automatically use it. Replace `<prefix>` and `<env>` with actual values:
+Call `activate_env(env_path="/mnt/sci_envs/<prefix>/envs/<env>")` exactly
+once. From that point on:
 
-```bash
-cat > env.sh << 'EOF'
-export MAMBA_ROOT_PREFIX=/mnt/sci_envs/<prefix>
-export CONDA_PREFIX=/mnt/sci_envs/<prefix>/envs/<env>
-export PATH="/mnt/sci_envs/<prefix>/envs/<env>/bin:$PATH"
-export LD_LIBRARY_PATH="/mnt/sci_envs/<prefix>/envs/<env>/lib:${LD_LIBRARY_PATH:-}"
-EOF
-```
+- Every bash result is prefixed with `[active env: <path>]` so the
+  active state is always visible — no probing needed.
+- `PATH`, `LD_LIBRARY_PATH`, `MAMBA_ROOT_PREFIX`, `CONDA_PREFIX`, and any
+  manifest `aliases` (e.g. `$CXX`) are injected automatically.
+- Run bare commands: `python3 your_script.py`, `make`, `verilator`, etc.
+  Do NOT write env.sh, do NOT prefix with `micromamba run`, do NOT
+  `source` anything.
 
-Verify it works — bare commands should now resolve to the env:
-```bash
-python3 --version
-```
-
-Once `env.sh` exists, all bash commands automatically use the env.
-No need for `micromamba run` prefixes — just use bare commands:
-```bash
-python your_script.py
-make
-g++  # works if compilers are installed in the env
-```
+For local-fallback envs (when `/mnt` is read-only), pass the local path
+instead, e.g. `activate_env(env_path="./env/envs/<env>")`.
 
 ## Common domain examples
 

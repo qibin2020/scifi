@@ -13,7 +13,7 @@ CommonStorage: rw
 
 Streaming inference project under `sim/`. Both `sim/src/stream_wrapper.v` and `sim/stream_wrapper_binder.cc` are empty stubs — write both from scratch. The submodules in `sim/src/` (kernel, dense, etc.) are complete and must not be touched. `sim/verify_golden.py` is the oracle that builds and tests your code against `dataset/`.
 
-The toolchain (verilator, g++, make, python3 with numpy) is on PATH. The task directory is writable.
+The required toolchain is at **prefix** `/mnt/sci_envs/fpga_toolchain` with **env name** `hgq` (full path: `/mnt/sci_envs/fpga_toolchain/envs/hgq`). It contains verilator, g++, make, python3, numpy. Use the common_env skill to discover and activate it; if missing, create it there with the same prefix + env name. The task directory is writable.
 
 ## Todo
 

@@ -14,7 +14,7 @@ can use it immediately. This task does NOT do any Verilog work — it only
 installs and verifies the toolchain.
 
 ## Todo
-1. Use the common_env skill to create a shared env with: verilator, gxx_linux-64, make, python>=3.10, numpy
+1. Use the common_env skill to create a shared env. Use **prefix** `/mnt/sci_envs/fpga_toolchain` and **env name** `hgq`. Packages: verilator, gxx_linux-64, make, python>=3.10, numpy. The full env path will be `/mnt/sci_envs/fpga_toolchain/envs/hgq`.
 2. Verify all four tools work: `verilator --version`, `g++ --version`, `make --version`, `python3 -c "import numpy"`
 3. Write the verified versions to `toolchain_versions.txt`
 
