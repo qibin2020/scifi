@@ -2,6 +2,7 @@
 Rank: 3
 BashTime: -1
 GPU: on
+MinGPU: 2
 NoMemory: on
 ---
 

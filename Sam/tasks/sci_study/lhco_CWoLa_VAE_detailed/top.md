@@ -16,7 +16,15 @@ R&D features at /mnt/lhco/data/features/:
 - labels.npy — 0=background (1M), 1=signal (100K)
 - feature_names: mj1(0), mj2(1), mjj(2), pt1(3), pt2(4), eta1(5), eta2(6), deta(7), dphi(8), dR(9), nconst1(10), nconst2(11), width1(12), width2(13), pt_ratio(14)
 
-**Method: CWoLa + VAE hybrid**
+**Method: CWoLa + VAE hybrid. Follow the recipe below exactly.**
+
+### DO NOT
+- Do NOT use labels.npy during training, fitting, preprocessing, or feature selection.
+  labels.npy is ONLY for the final AUC evaluation (`roc_auc_score(labels, scores)`).
+  Using true labels to select training subsets, fit scalers, or define background
+  samples is label leakage and invalidates the result.
+- Do NOT deviate from the recipe below. This is an execution benchmark, not a research task.
+- Do NOT fabricate metrics. If AUC < 0.6 after training, print the real AUC and stop.
 
 ### CWoLa
 Signal is a resonance at ~3.5 TeV in dijet mass (mjj, index 2).
@@ -27,13 +35,13 @@ Signal is a resonance at ~3.5 TeV in dijet mass (mjj, index 2).
 
 ### VAE
 1. Select 5 features: pt1(3), pt2(4), mjj(2), width1(12), width2(13)
-2. Preprocess: log1p, then StandardScaler fit on background only. Save scaler.
+2. Preprocess: log1p, then StandardScaler fit on SIDEBAND events only (not labels.npy background). Save scaler.
 3. Architecture with BatchNorm:
    ```
    Encoder: Linear(5,32)->BN(32)->LeakyReLU -> Linear(32,16)->BN(16)->LeakyReLU -> fc_mu(16,2), fc_logvar(16,2)
    Decoder: Linear(2,16)->BN(16)->LeakyReLU -> Linear(16,32)->BN(32)->LeakyReLU -> Linear(32,5)
    ```
-4. Train on background only, Adam lr=1e-3, batch=4096, 10 epochs. Loss = MSE + 0.5*KL.
+4. Train on SIDEBAND events only, Adam lr=1e-3, batch=4096, 10 epochs. Loss = MSE + 0.5*KL.
 5. Score ALL events: MSE reconstruction error + 0.5 * KL per event
 
 ### Hybrid
@@ -65,3 +73,4 @@ Target: AUC > 0.78.
 - /mnt/lhco/guided_v2/results/metrics.json exists with 'auc' > 0.78
 - /mnt/lhco/guided_v2/results/roc_curve.png exists, > 5 KB
 - /mnt/lhco/guided_v2/results/score_dist.png exists, > 5 KB
+- No label leakage: grep the training script for uses of labels.npy — it must ONLY appear in the final evaluation block (roc_auc_score), never in scaler.fit, model training data selection, or background mask construction

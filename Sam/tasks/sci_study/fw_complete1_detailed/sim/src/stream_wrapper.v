@@ -2,6 +2,8 @@
 // `define DEBUG
 
 module stream_wrapper (
+    // PORT LIST IS FIXED — do NOT add or remove ports.
+    // The binder (stream_wrapper_binder.cc) drives exactly these signals.
     input  wire         clk,
     // verilator lint_off UNUSEDSIGNAL
     input  wire [511:0] model_inp,
