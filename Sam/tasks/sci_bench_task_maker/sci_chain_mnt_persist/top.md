@@ -1,6 +1,6 @@
 ---
 Rank: 2
-Timeout: 600
+ThinkTime: 600
 CommonStorage: rw
 NoMemory: on
 ---

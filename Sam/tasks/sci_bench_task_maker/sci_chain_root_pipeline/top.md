@@ -1,6 +1,6 @@
 ---
 Rank: 3
-Timeout: 2400
+ThinkTime: 2400
 BashTime: -1
 NoMemory: on
 ---

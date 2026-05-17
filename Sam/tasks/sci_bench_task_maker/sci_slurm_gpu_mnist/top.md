@@ -1,6 +1,6 @@
 ---
 Rank: 3
-Timeout: 3600
+ThinkTime: 3600
 BashTime: -1
 Skills: NERSC_slurm
 NoMemory: on

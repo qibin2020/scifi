@@ -1,6 +1,6 @@
 ---
 Rank: 3
-Timeout: 1800
+ThinkTime: 1800
 BashTime: -1
 GPU: on
 NoMemory: on

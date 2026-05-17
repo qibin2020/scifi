@@ -143,7 +143,7 @@ export MAX_CONTEXT=80                   # max LLM messages kept before trim
 export MAX_DEPTH=5                      # max subtask nesting depth
 export MAX_PARALLEL_AGENTS=4            # concurrent subtask cap (scheduler semaphore)
 export MAX_BASH_TIME=300                # per-bash-call timeout cap
-export TOTAL_WALL_PER_RANK=2700,2700,2700,2700,2700,2700   # per-rank total wall incl. bash; 45 min uniform safety cap
+export TOTAL_WALL_PER_RANK=3600,3600,3600,3600,3600,3600   # per-rank total wall incl. bash; 1 hr uniform safety cap
 
 ## Driver — robustness knobs (optional; defaults shown apply if unset).
 ## ERROR_LIMIT/NUDGE_LIMIT trigger session-level model blacklist; raise to

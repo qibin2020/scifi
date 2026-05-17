@@ -1,6 +1,6 @@
 ---
 Rank: 1
-Timeout: 300
+ThinkTime: 300
 Skills: text_stats
 NoMemory: on
 ---

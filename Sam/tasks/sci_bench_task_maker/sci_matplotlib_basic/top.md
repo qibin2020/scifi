@@ -1,6 +1,6 @@
 ---
 Rank: 1
-Timeout: 600
+ThinkTime: 600
 NoMemory: on
 ---
 

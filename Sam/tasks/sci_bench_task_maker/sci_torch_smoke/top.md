@@ -1,6 +1,6 @@
 ---
 Rank: 1
-Timeout: 900
+ThinkTime: 900
 BashTime: -1
 GPU: local
 NoMemory: on

@@ -2,7 +2,7 @@
 Rank: 0
 NoMemory: on
 BashTime: 30
-Timeout: 300
+ThinkTime: 300
 _DriverNote: this key must not appear in agent prompt
 ---
 
