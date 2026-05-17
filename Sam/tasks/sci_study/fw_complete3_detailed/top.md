@@ -1,5 +1,5 @@
 ---
-Rank: 3
+Rank: 2
 ThinkTime: 1800
 BashTime: -1
 NoMemory: on

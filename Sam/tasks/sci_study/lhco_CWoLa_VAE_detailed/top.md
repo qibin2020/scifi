@@ -1,5 +1,5 @@
 ---
-Rank: 2
+Rank: 3
 ThinkTime: 1800
 BashTime: 1800
 Skills: common_env

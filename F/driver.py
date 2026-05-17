@@ -57,7 +57,7 @@ MAX_RETRIES_EXHAUSTED = int(os.environ.get("MAX_RETRIES_EXHAUSTED", "20"))
 # Prescan: metadata (deterministic, default) or llm (multi-turn with read-only tools).
 PRESCAN_MODE  = os.environ.get("PRESCAN_MODE", "metadata")
 PRESCAN_MODEL = os.environ.get("PRESCAN_MODEL", "")
-DEFAULT_RANK  = int(os.environ.get("DEFAULT_RANK", "3"))
+DEFAULT_RANK  = int(os.environ.get("DEFAULT_RANK", "2"))
 # _append_feedback writes "## Attempt N" headers between SAM-attempt blocks
 # in the review-feedback file. Provides explicit attempt count + markdown
 # structure for the chain-glue framing ("LATEST Attempt block", etc.) to
