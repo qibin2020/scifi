@@ -121,7 +121,10 @@ def main():
     rtl_y, n_out = run_inference(lib, golden_x, args.inp_pause, args.seed)
 
     if n_out < len(golden_y):
-        print(f"WARNING: only got {n_out} outputs, expected {len(golden_y)}")
+        print(f"\nFAILED: only got {n_out} outputs, expected {len(golden_y)}")
+        if not args.no_build:
+            make_clean()
+        sys.exit(1)
 
     passed = verify(golden_y, rtl_y)
 
