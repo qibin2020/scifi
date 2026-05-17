@@ -1,5 +1,5 @@
 ---
-Rank: 4
+Rank: 3
 ThinkTime: 5400
 BashTime: -1
 Skills: NERSC_slurm

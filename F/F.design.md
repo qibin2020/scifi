@@ -445,7 +445,7 @@ and the total wall limit apply.
 
 Hard clock limit that DOES count bash/tool time:
 ```
-TOTAL_WALL_PER_RANK = "2700,2700,2700,2700,2700,2700"   # uniform 45 min cap (driver default = ENV.sh)
+TOTAL_WALL_PER_RANK = "600,1800,3600,9000,21600,43200"   # rank 0=10m, 1=30m, 2=1h, 3=2.5h, 4=6h, 5=12h
 ```
 
 This catches tasks where bash calls consume hours while LLM time stays low.
@@ -1031,7 +1031,7 @@ Per-job env overrides (benchmarks / parallel runs):
 | `MAX_DEPTH` | 5 | Max subtask nesting |
 | `MAX_PARALLEL_AGENTS` | 4 | Concurrent subtask limit |
 | `MAX_BASH_TIME` | 300 | Global bash timeout cap |
-| `TOTAL_WALL_PER_RANK` | 2700,2700,2700,2700,2700,2700 | Per-rank total wall limit (incl. bash). Uniform 45 min cap. |
+| `TOTAL_WALL_PER_RANK` | 600,1800,3600,9000,21600,43200 | Per-rank total wall (incl. bash). rank 0=10m, 1=30m, 2=1h, 3=2.5h, 4=6h, 5=12h |
 | `ERROR_LIMIT` | 5 | Consecutive API errors before pam blacklists the worker model (sec 6.8) |
 | `NUDGE_LIMIT` | 5 | Consecutive no-tool-call / malformed-tool turns before blacklist (sec 6.8) |
 | `TOOL_RESULT_CAP` | 10000 | Tool result truncation cap (line-based head+tail). full_output=true uses TOOL_RESULT_CAP_FULL (30000) |
@@ -1130,7 +1130,7 @@ ENV.sh (host)
 | `MAX_DEPTH` | `5` | portal.py (driver) | driver.py |
 | `MAX_PARALLEL_AGENTS` | `4` | portal.py (driver) | driver.py |
 | `MAX_BASH_TIME` | `300` | portal.py (driver) | driver.py |
-| `TOTAL_WALL_PER_RANK` | `2700,2700,2700,2700,2700,2700` | portal.py (driver) | driver.py |
+| `TOTAL_WALL_PER_RANK` | `600,1800,3600,9000,21600,43200` | portal.py (driver) | driver.py |
 | `SKILLS_DIR` | `/srv/skills` | portal.py (driver), task_maker.sh, skill_maker.sh | driver.py, skill_maker.py |
 | `MAX_EVOLVE_ITER` | `20` | portal.py (evolution) | evolution.py |
 | `CAM_DIR` | `$BASEDIR/Cam` → `/cam` | portal.py (all profiles, conditional) | All Python agents (audit) |

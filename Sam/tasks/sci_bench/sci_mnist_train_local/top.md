@@ -1,5 +1,5 @@
 ---
-Rank: 3
+Rank: 2
 BashTime: -1
 GPU: local
 NoMemory: on

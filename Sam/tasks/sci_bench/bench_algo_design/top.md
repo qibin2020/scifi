@@ -1,5 +1,5 @@
 ---
-Rank: 3
+Rank: 2
 NoMemory: on
 ---
 

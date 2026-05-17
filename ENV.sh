@@ -119,61 +119,41 @@ export SCIFI_MODEL=ui
 ## One of: common_env | local_env | temp_env
 export DEFAULT_ENV_SKILL=temp_env
 
-## Driver — limits
+## Driver — tuning knobs (all have defaults in driver.py; uncomment to override)
 ##
-## Default: non-thinking worker (fast, cheap, 10 iters) + thinking review
-## (can verify-from-fail or advise). Worker iter cap auto-selected by model:
-## non-thinking gets WORK cap, thinking gets WORK_THINK cap.
+## Iter caps: worker auto-selects think/nonthink cap via pam.is_thinkable().
+## Review uses same cap for both done/fail cases.
+# export MAX_ITERATIONS_WORK=25          # nonthink worker iters per SAM
+# export MAX_ITERATIONS_WORK_THINK=25    # think worker iters per SAM
+# export MAX_ITERATIONS_REVIEW_DONE=30   # review iters (done case)
+# export MAX_ITERATIONS_REVIEW_FAIL=30   # review iters (fail case)
+# export MAX_ITERATIONS_REFLECT=10       # reflect (diagnostic) iters
+# export MAX_RETRIES_REJECTED=3          # done-claim rejections before reflect
+# export MAX_RETRIES_EXHAUSTED=20        # retry rounds (each spawns fresh SAM)
+# export RECAP_EVERY=5                   # re-inject task spec every N iters
+# export MAX_CONTEXT=80                  # max messages before oldest trimmed
+# export MAX_DEPTH=5                     # max subtask nesting
+# export MAX_PARALLEL_AGENTS=4           # concurrent subtask cap
+# export MAX_BASH_TIME=300               # per-bash-call timeout (sec)
+# export TOTAL_WALL_PER_RANK=600,1800,3600,9000,21600,43200  # rank 0=10m, 1=30m, 2=1h, 3=2.5h, 4=6h, 5=12h
 ##
-## System-level limits — each agent gets its own iter cap; each retry path its
-## own cap. No global flooring; values apply directly.
-##   - MAX_ITERATIONS_WORK        : non-thinking worker iter cap per SAM
-##   - MAX_ITERATIONS_WORK_THINK  : thinking worker iter cap per SAM
-##   - MAX_ITERATIONS_REVIEW_DONE : done-case reviewer iter cap (think or not)
-##   - MAX_ITERATIONS_REVIEW_FAIL : failed-case reviewer iter cap (think or not)
-##   - MAX_ITERATIONS_REFLECT     : reflect (diagnostic) agent iter cap
-##   - MAX_RETRIES_REJECTED       : done-claim rejection retry cap (within SAM)
-##   - MAX_RETRIES_EXHAUSTED      : LOOP_EXHAUSTED retry cap (spawns new SAMs)
-##   - MAX_BASH_TIME              : per-bash-call timeout (BashTime: -1 disables)
-##   - TOTAL_WALL_PER_RANK        : per-rank wall-clock cap incl. bash
+## Model override (all fallback to pam if unset; task ForceModel/ControlModel take priority)
+## When set, bypasses pam rank selection and forces the named model for ALL tasks.
+export WORKER_MODEL=gemma4             # force worker model (default: pam.select(rank))
+export REVIEW_MODEL=gemma4-thinking      # force review model (default: pam.highest())
 ##
-export MAX_ITERATIONS_WORK=25           # non-thinking worker iter cap per SAM
-export MAX_ITERATIONS_WORK_THINK=25     # thinking worker iter cap per SAM
-export MAX_ITERATIONS_REVIEW_DONE=30    # review iter cap (same for think/non-think review)
-export MAX_ITERATIONS_REVIEW_FAIL=30    # review iter cap (same for done/fail case)
-export MAX_ITERATIONS_REFLECT=10        # reflect (diagnostic) agent iter cap
-export MAX_RETRIES_REJECTED=3           # max done-claim rejections before reflect (within SAM)
-export MAX_RETRIES_EXHAUSTED=20         # max LOOP_EXHAUSTED → retry rounds (each spawns new SAM)
-export RECAP_EVERY=5               # re-ground every N iters (prevents context drift)
-export MAX_CONTEXT=80                   # max LLM messages kept before trim
-export MAX_DEPTH=5                      # max subtask nesting depth
-export MAX_PARALLEL_AGENTS=4            # concurrent subtask cap (scheduler semaphore)
-export MAX_BASH_TIME=300                # per-bash-call timeout cap
-export TOTAL_WALL_PER_RANK=3600,3600,3600,3600,3600,3600   # per-rank total wall incl. bash; 1 hr uniform safety cap
-
-## Driver — model override
-## Worker model priority: task ForceModel → WORKER_MODEL env → pam.select(rank)
-## Review model priority: task ControlModel → REVIEW_MODEL env → pam.highest()
-## Prescan model priority: task ControlModel → PRESCAN_MODEL env → pam.highest()
-# export WORKER_MODEL=gemma4           # uncomment to override worker model globally
-export REVIEW_MODEL=gemma4-thinking     # thinking review can solve directly via verify-from-fail
-export PRESCAN_MODEL=gemma4             # prescan model (think/non-think determined by model)
-
-## Driver — prescan
-## PRESCAN_MODE: metadata (deterministic, default) | llm (multi-turn with read-only tools)
-## DEFAULT_RANK: used when task has no Rank: in frontmatter (metadata mode)
-export PRESCAN_MODE=metadata
-export DEFAULT_RANK=3
-
-## Driver — robustness knobs (optional; defaults shown apply if unset).
-## ERROR_LIMIT/NUDGE_LIMIT trigger session-level model blacklist; raise to
-## be more tolerant of upstream flake, lower for tighter detection.
-# export ERROR_LIMIT=5             # consecutive API errors → blacklist worker model
-# export NUDGE_LIMIT=5             # consecutive no-tool / malformed-tool turns → blacklist
-# export TOOL_RESULT_CAP=10000     # chars kept of bash/read_file tool result (head + last 5 lines)
+## Prescan
+# export PRESCAN_MODE=metadata           # metadata (default) | llm
+# export DEFAULT_RANK=3                  # rank when task has no Rank: field (0=trivial .. N=hard)
+# export PRESCAN_MODEL=gemma4            # force prescan model when PRESCAN_MODE is llm (default: pam.highest())
+##
+## Robustness (raise to tolerate flaky providers)
+# export ERROR_LIMIT=5                   # API errors before model blacklist
+# export NUDGE_LIMIT=5                   # no-tool turns before blacklist
+# export TOOL_RESULT_CAP=10000           # tool output truncation (chars)
 
 ## Evolution
-export MAX_EVOLVE_ITER=20
+# export MAX_EVOLVE_ITER=20             # max evolution iterations
 
 ## Cam (write-only audit recording)
 export CAM_DIR="$BASEDIR/Cam"

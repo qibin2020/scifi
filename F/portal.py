@@ -451,26 +451,26 @@ def build_driver_cmd(task_name, extra_args):
         "GATEWAY_URL": "http://localhost:%s" % _env("GATEWAY_PORT"),
         "FALLBACK_HIGHEST": _env("FALLBACK_HIGHEST"),
         "FALLBACK_WORKING": _env("FALLBACK_WORKING"),
-        "MAX_ITERATIONS_WORK":        _env("MAX_ITERATIONS_WORK"),
-        "MAX_ITERATIONS_WORK_THINK":  _env("MAX_ITERATIONS_WORK_THINK"),
-        "MAX_ITERATIONS_REVIEW_DONE": _env("MAX_ITERATIONS_REVIEW_DONE"),
-        "MAX_ITERATIONS_REVIEW_FAIL": _env("MAX_ITERATIONS_REVIEW_FAIL"),
-        "MAX_ITERATIONS_REFLECT":     _env("MAX_ITERATIONS_REFLECT"),
-        "MAX_RETRIES_REJECTED":       _env("MAX_RETRIES_REJECTED"),
-        "MAX_RETRIES_EXHAUSTED":      _env("MAX_RETRIES_EXHAUSTED"),
-        "RECAP_EVERY": _env("RECAP_EVERY"),
-        "PRESCAN_MODE": _env("PRESCAN_MODE"),
-        "PRESCAN_MODEL": _env("PRESCAN_MODEL"),
-        "DEFAULT_RANK": _env("DEFAULT_RANK"),
-        "MAX_CONTEXT": _env("MAX_CONTEXT"),
-        "MAX_DEPTH": _env("MAX_DEPTH"),
-        "MAX_PARALLEL_AGENTS": _env("MAX_PARALLEL_AGENTS"),
-        "MAX_BASH_TIME": _env("MAX_BASH_TIME"),
         "TOTAL_WALL_PER_RANK": _env("TOTAL_WALL_PER_RANK"),
-        # ERROR_LIMIT, NUDGE_LIMIT, TOOL_RESULT_CAP are intentionally not
-        # forwarded — driver-internal knobs, commented out in ENV.sh by
-        # default; driver.py's os.environ.get(name, default) handles them.
-        # To override, uncomment in ENV.sh AND add forward here.
+        # Driver tuning knobs — only forwarded if set in ENV (all have
+        # defaults in driver.py). Uncomment in ENV.sh to override.
+        **{k: v for k, v in {
+            "MAX_ITERATIONS_WORK": _env_opt("MAX_ITERATIONS_WORK"),
+            "MAX_ITERATIONS_WORK_THINK": _env_opt("MAX_ITERATIONS_WORK_THINK"),
+            "MAX_ITERATIONS_REVIEW_DONE": _env_opt("MAX_ITERATIONS_REVIEW_DONE"),
+            "MAX_ITERATIONS_REVIEW_FAIL": _env_opt("MAX_ITERATIONS_REVIEW_FAIL"),
+            "MAX_ITERATIONS_REFLECT": _env_opt("MAX_ITERATIONS_REFLECT"),
+            "MAX_RETRIES_REJECTED": _env_opt("MAX_RETRIES_REJECTED"),
+            "MAX_RETRIES_EXHAUSTED": _env_opt("MAX_RETRIES_EXHAUSTED"),
+            "RECAP_EVERY": _env_opt("RECAP_EVERY"),
+            "PRESCAN_MODE": _env_opt("PRESCAN_MODE"),
+            "PRESCAN_MODEL": _env_opt("PRESCAN_MODEL"),
+            "DEFAULT_RANK": _env_opt("DEFAULT_RANK"),
+            "MAX_CONTEXT": _env_opt("MAX_CONTEXT"),
+            "MAX_DEPTH": _env_opt("MAX_DEPTH"),
+            "MAX_PARALLEL_AGENTS": _env_opt("MAX_PARALLEL_AGENTS"),
+            "MAX_BASH_TIME": _env_opt("MAX_BASH_TIME"),
+        }.items() if v},
         "SKILLS_DIR": "/srv/skills",
         "EFFECTIVE_COMMON_STORAGE": common_storage,
         "EFFECTIVE_COMMON_HOME": common_home,
@@ -538,7 +538,7 @@ def build_evolution_cmd(extra_args):
     env = {
         "GATEWAY_URL": "http://localhost:%s" % _env("GATEWAY_PORT"),
         "FALLBACK_HIGHEST": _env("FALLBACK_HIGHEST"),
-        "MAX_EVOLVE_ITER": _env("MAX_EVOLVE_ITER"),
+        **({k: v} if (v := _env_opt("MAX_EVOLVE_ITER")) else {}),
     }
     if cam_dir:
         env["CAM_DIR"] = "/cam"

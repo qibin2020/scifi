@@ -1,5 +1,5 @@
 ---
-Rank: 4
+Rank: 3
 ThinkTime: 2400
 BashTime: -1
 GPU: local

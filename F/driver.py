@@ -56,7 +56,7 @@ MAX_RETRIES_REJECTED  = int(os.environ.get("MAX_RETRIES_REJECTED",  "3"))
 MAX_RETRIES_EXHAUSTED = int(os.environ.get("MAX_RETRIES_EXHAUSTED", "20"))
 # Prescan: metadata (deterministic, default) or llm (multi-turn with read-only tools).
 PRESCAN_MODE  = os.environ.get("PRESCAN_MODE", "metadata")
-PRESCAN_MODEL = os.environ.get("PRESCAN_MODEL", "gemma4")
+PRESCAN_MODEL = os.environ.get("PRESCAN_MODEL", "")
 DEFAULT_RANK  = int(os.environ.get("DEFAULT_RANK", "3"))
 # _append_feedback writes "## Attempt N" headers between SAM-attempt blocks
 # in the review-feedback file. Provides explicit attempt count + markdown
@@ -74,7 +74,7 @@ MAX_BASH_TIME = int(os.environ.get("MAX_BASH_TIME", "300"))  # max seconds per b
 # purely a hint to Pam for model selection; iteration count is bounded
 # by MAX_ITERATIONS_WORK, and LLM-only wall (if any) comes from per-task
 # Timeout/ThinkTime metadata, not from a rank-default table.
-TOTAL_WALL_PER_RANK = os.environ.get("TOTAL_WALL_PER_RANK", "2700,2700,2700,2700,2700,2700")
+TOTAL_WALL_PER_RANK = os.environ.get("TOTAL_WALL_PER_RANK", "600,1800,3600,9000,21600,43200")
 _total_wall_limits = [int(x) for x in TOTAL_WALL_PER_RANK.split(",")]
 # Context caps (chars). Full content always available via tools.
 CAP_MEMORY = int(os.environ.get("CAP_MEMORY", "4000"))

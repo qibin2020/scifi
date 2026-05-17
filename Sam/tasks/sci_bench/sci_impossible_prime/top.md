@@ -1,5 +1,5 @@
 ---
-Rank: 2
+Rank: 1
 ThinkTime: 600
 NoMemory: on
 ---
