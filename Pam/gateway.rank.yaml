@@ -16,11 +16,44 @@ models:
   #   max_thinking_budget: 128000
   #   max_tokens: 32000
 
-  # rank 2: work + control capable
+  # rank 2: all candidates active for one-at-a-time benchmarking. Pin per-task
+  # via ForceModel: in task .md files, OR comment out all but the one being
+  # tested. Final ranks will be re-assigned after benchmark results are in.
+  # Flash variants bake thinking into the gateway alias via reasoning_effort,
+  # so thinkable: false (driver's Anthropic-style thinking_budget path is
+  # bypassed — thinking happens at gateway via extra_body.reasoning_effort).
   - rank: 2
     name: gemma4
     budget: -1
-    thinkable: false   # 31b dense, Ollama Cloud, 42/42 sci bench validated
+    thinkable: false   # 31b dense, Ollama Cloud, 42/42 sci bench validated  ← currently active
+  - rank: 2
+    name: gemma4-thinking
+    budget: -1
+    thinkable: true    # gemma4 with native think:true (binary, no effort tier)
+  # - rank: 2
+  #   name: deepseek-v4-flash-off       # reasoning_effort=low — fast intuitive
+  #   budget: -1
+  #   thinkable: false
+  # - rank: 2
+  #   name: deepseek-v4-flash-on        # reasoning_effort=medium — default thinking
+  #   budget: -1
+  #   thinkable: false
+  # - rank: 2
+  #   name: deepseek-v4-flash-max       # reasoning_effort=high — heavy CoT
+  #   budget: -1
+  #   thinkable: false
+  # - rank: 2
+  #   name: deepseek-v4-pro             # 1.6T/49B MoE — premium tier (default thinking)
+  #   budget: -1
+  #   thinkable: false
+  # - rank: 2
+  #   name: deepseek-v4-pro-off          # 1.6T/49B MoE — reasoning_effort=low
+  #   budget: -1
+  #   thinkable: false
+  # - rank: 2
+  #   name: deepseek-v4-pro-on           # 1.6T/49B MoE — reasoning_effort=medium
+  #   budget: -1
+  #   thinkable: false
   # - rank: 2
   #   name: qwen3-coder
   #   budget: -1

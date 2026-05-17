@@ -39,7 +39,7 @@ case "$ACTION" in
             if [ -n "${!_ev:-}" ]; then
                 ENV_FLAGS+=(--env "$_ev=${!_ev}")
             fi
-        done < <(compgen -e | grep -E '^(LITELLM_MASTER_KEY|(OLLAMA|BEDROCK|ANTHROPIC|OPENAI|GEMINI|MISTRAL|DEEPSEEK|OPENROUTER|GROQ|TOGETHERAI|FIREWORKS_AI|AZURE)_API_KEY[_0-9]*|AZURE_API_BASE|AWS_(DEFAULT_)?REGION)$' || true)
+        done < <(compgen -e | grep -E '^(LITELLM_MASTER_KEY|(OLLAMA|BEDROCK|ANTHROPIC|OPENAI|GEMINI|MISTRAL|DEEPSEEK|OPENROUTER|GROQ|TOGETHERAI|FIREWORKS_AI|AZURE|VENICE)_API_KEY[_0-9]*|AZURE_API_BASE|AWS_(DEFAULT_)?REGION)$' || true)
 
         $APPTAINER instance start \
                 "${ENV_FLAGS[@]}" \
