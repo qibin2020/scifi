@@ -121,29 +121,49 @@ export DEFAULT_ENV_SKILL=temp_env
 
 ## Driver — limits
 ##
+## Default: non-thinking worker (fast, cheap, 10 iters) + thinking review
+## (can verify-from-fail or advise). Worker iter cap auto-selected by model:
+## non-thinking gets WORK cap, thinking gets WORK_THINK cap.
+##
 ## System-level limits — each agent gets its own iter cap; each retry path its
 ## own cap. No global flooring; values apply directly.
-##   - MAX_ITERATIONS_WORK        : worker iter cap per SAM
-##   - MAX_ITERATIONS_REVIEW_DONE : done-case reviewer iter cap
-##   - MAX_ITERATIONS_REVIEW_FAIL : failed-case reviewer iter cap
+##   - MAX_ITERATIONS_WORK        : non-thinking worker iter cap per SAM
+##   - MAX_ITERATIONS_WORK_THINK  : thinking worker iter cap per SAM
+##   - MAX_ITERATIONS_REVIEW_DONE : done-case reviewer iter cap (think or not)
+##   - MAX_ITERATIONS_REVIEW_FAIL : failed-case reviewer iter cap (think or not)
 ##   - MAX_ITERATIONS_REFLECT     : reflect (diagnostic) agent iter cap
 ##   - MAX_RETRIES_REJECTED       : done-claim rejection retry cap (within SAM)
 ##   - MAX_RETRIES_EXHAUSTED      : LOOP_EXHAUSTED retry cap (spawns new SAMs)
 ##   - MAX_BASH_TIME              : per-bash-call timeout (BashTime: -1 disables)
 ##   - TOTAL_WALL_PER_RANK        : per-rank wall-clock cap incl. bash
 ##
-export MAX_ITERATIONS_WORK=50           # worker iter cap per SAM
-export MAX_ITERATIONS_REVIEW_DONE=50    # done-case reviewer iter cap
-export MAX_ITERATIONS_REVIEW_FAIL=10    # failed-case reviewer iter cap (tighter — no standalone verify)
-export MAX_ITERATIONS_REFLECT=15        # reflect agent iter cap
+export MAX_ITERATIONS_WORK=25           # non-thinking worker iter cap per SAM
+export MAX_ITERATIONS_WORK_THINK=25     # thinking worker iter cap per SAM
+export MAX_ITERATIONS_REVIEW_DONE=30    # review iter cap (same for think/non-think review)
+export MAX_ITERATIONS_REVIEW_FAIL=30    # review iter cap (same for done/fail case)
+export MAX_ITERATIONS_REFLECT=10        # reflect (diagnostic) agent iter cap
 export MAX_RETRIES_REJECTED=3           # max done-claim rejections before reflect (within SAM)
-export MAX_RETRIES_EXHAUSTED=3          # max LOOP_EXHAUSTED → retry rounds (each spawns new SAM)
-export CHECKPOINT_EVERY=5               # re-ground every N iters (re-inject task + memory)
+export MAX_RETRIES_EXHAUSTED=20         # max LOOP_EXHAUSTED → retry rounds (each spawns new SAM)
+export RECAP_EVERY=5               # re-ground every N iters (prevents context drift)
 export MAX_CONTEXT=80                   # max LLM messages kept before trim
 export MAX_DEPTH=5                      # max subtask nesting depth
 export MAX_PARALLEL_AGENTS=4            # concurrent subtask cap (scheduler semaphore)
 export MAX_BASH_TIME=300                # per-bash-call timeout cap
 export TOTAL_WALL_PER_RANK=3600,3600,3600,3600,3600,3600   # per-rank total wall incl. bash; 1 hr uniform safety cap
+
+## Driver — model override
+## Worker model priority: task ForceModel → WORKER_MODEL env → pam.select(rank)
+## Review model priority: task ControlModel → REVIEW_MODEL env → pam.highest()
+## Prescan model priority: task ControlModel → PRESCAN_MODEL env → pam.highest()
+# export WORKER_MODEL=gemma4           # uncomment to override worker model globally
+export REVIEW_MODEL=gemma4-thinking     # thinking review can solve directly via verify-from-fail
+export PRESCAN_MODEL=gemma4             # prescan model (think/non-think determined by model)
+
+## Driver — prescan
+## PRESCAN_MODE: metadata (deterministic, default) | llm (multi-turn with read-only tools)
+## DEFAULT_RANK: used when task has no Rank: in frontmatter (metadata mode)
+export PRESCAN_MODE=metadata
+export DEFAULT_RANK=3
 
 ## Driver — robustness knobs (optional; defaults shown apply if unset).
 ## ERROR_LIMIT/NUDGE_LIMIT trigger session-level model blacklist; raise to

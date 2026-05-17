@@ -8,7 +8,7 @@ F is a self-improving agentic system built on the **SAM (Self-Assessed Module)**
 
 > With sufficient **variation** (trying different approaches) and **iteration** (repeating with feedback), any achievable expectation MUST eventually be met.
 
-The driver never gives up because convergence is structural: each iteration gets new information (tool results, verifier feedback, memory, checkpoint re-grounding), making progress inevitable.
+The driver never gives up because convergence is structural: each iteration gets new information (tool results, verifier feedback, memory, recap re-grounding), making progress inevitable.
 
 ### Hard Beliefs (embedded in code, not configurable)
 
@@ -31,7 +31,7 @@ Two layers of control with different philosophies:
   The system guarantees these; agents cannot override them.
 
 - **Inner (LLM prompts, agent guidance)**: Soft, suggestive, flexible. Strategy notes,
-  checkpoint reminders, timeout suggestions, review feedback — the agent has its own
+  recap reminders, timeout suggestions, review feedback — the agent has its own
   reasoning and we guide it, never force it. Stronger or lighter suggestions are both
   valid; the agent decides how to apply them.
 
@@ -48,7 +48,7 @@ suggest it in the prompt. Example: bash timeout defaults to 30s (system), but fo
 ### 2.1 Sandwich Structure
 
 ```
-PRESCAN (ControlModel or highest, 1 LLM call)
+PRESCAN (metadata mode: deterministic | llm mode: multi-turn with read-only tools)
   → rank, subtask dependencies, skills, context assembly
   ↓
 SELECT MODEL (ForceModel or pam.select: highest rank ≤ R, health + budget + blacklist)
@@ -58,7 +58,7 @@ SELECT MODEL (ForceModel or pam.select: highest rank ≤ R, health + budget + bl
 │  ├─ pause check (threading.Event)                    │
 │  ├─ wall limit (excludes tool + subagent time)       │
 │  ├─ effective iter count (read-only iters are free)  │
-│  ├─ checkpoint (every N iters, re-inject task+memory)│
+│  ├─ recap (every N iters, re-inject task+memory)│
 │  ├─ API call (thinking if enabled by review)         │
 │  │   ├─ malformed tool call → drop, nudge, continue  │
 │  │   ├─ nudge limit (5 consecutive) → blacklist+break│
@@ -415,10 +415,14 @@ Each agent has its own iter cap; they don't gate each other (no global
 flooring).
 
 ```
-MAX_ITERATIONS_WORK        = 50   # worker iter cap per SAM
-MAX_ITERATIONS_REVIEW_DONE = 50   # done-case reviewer cap
-MAX_ITERATIONS_REVIEW_FAIL = 10   # failed-case reviewer cap
-MAX_ITERATIONS_REFLECT     = 15   # reflect (diagnostic) cap
+MAX_ITERATIONS_WORK        = 25   # non-thinking worker iter cap per SAM
+MAX_ITERATIONS_WORK_THINK  = 25   # thinking worker iter cap per SAM (auto-detected)
+MAX_ITERATIONS_REVIEW_DONE = 30   # review iter cap (same for think/non-think review)
+MAX_ITERATIONS_REVIEW_FAIL = 30   # review iter cap (same for done/fail case)
+MAX_ITERATIONS_REFLECT     = 10   # reflect (diagnostic) cap
+# Worker model auto-detected as thinking via pam.is_thinkable() → selects
+# prompt variant (SYSTEM_WORK_THINK vs SYSTEM_WORK_NONTHINK) and iter cap.
+# Review uses ControlModel (task frontmatter) or pam.highest() default.
 ```
 
 Worker: read-only iters are free (see sec 7). Rank only hints model
@@ -431,8 +435,7 @@ the task explicitly opts in*. There is no rank-default. Tasks set it via
 metadata:
 
 ```
-Timeout: 120          # seconds of LLM time
-ThinkTime: 600        # alternative name (also accepted); -1 disables
+ThinkTime: 600        # seconds of LLM time per SAM (excludes bash/tool time); -1 disables
 ```
 
 If neither is set, no LLM-only wall is enforced — only the iteration cap
@@ -568,7 +571,7 @@ agent's first message, parsed from `task_content` at injection time.
 | `CommonStorage: rw` | Bind `/mnt` read-write | "Check /mnt/sci_envs/ for existing envs" |
 | `CommonStorage: ro` | Bind `/mnt` read-only | "Can use but not modify shared envs" |
 
-Not all metadata needs hints: Rank, ForceModel, ControlModel, Thinking, NoMemory,
+Not all metadata needs hints: Rank, ForceModel, ControlModel, NoMemory,
 TaskGroup are fully handled by the outer system and invisible to the agent.
 
 ### 6.8 Early Break
@@ -594,9 +597,10 @@ hammering on a model with bad credentials, malformed id, or gateway misroute.
 | Task content | 4000 chars | CAP_TASK |
 | Global memory | 1000 chars | CAP_GLOBAL |
 | Task memory | 4000 chars | CAP_MEMORY |
-| Tool results | TOOL_RESULT_CAP (default 10000) | _truncate() — head + last 5 lines |
-| Checkpoint task | 4000 chars | CAP_TASK |
-| Checkpoint memory | 4000 chars | CAP_MEMORY |
+| Tool results | TOOL_RESULT_CAP (default 10000) | _truncate() — line-based head 50 + tail 50, char cap. full_output=true → 30K |
+| Old tool results | 1500 chars | _compact_old_results() — tiered: <500 keep, 500-2K head 5+tail 10, >2K head 5+tail 15 |
+| Recap task | 4000 chars | CAP_TASK |
+| Recap memory | 4000 chars | CAP_MEMORY |
 
 Full content always available via `memory_read` and `read_file` tools.
 Truncation shows head + last 5 lines so agents see both errors and final results.
@@ -724,7 +728,7 @@ Opt-in cross-task memory for related tasks. Enable with `TaskGroup: name` in tas
 
 ### 9.4 History Events
 
-SAM_START, PRESCAN, ITERATION, CHECKPOINT, TOOL_CALL, TOOL_RESULT,
+SAM_START, PRESCAN, ITERATION, RECAP, TOOL_CALL, TOOL_RESULT,
 DONE_CLAIMED, REVIEW_START, REVIEW_VERDICT_PASS/FAIL, REVIEW_DECISION,
 REVIEW_REJECTED, REVIEW_FALLBACK, NUDGE, NUDGE_LIMIT, API_ERROR,
 ERROR_LIMIT, JSON_ERROR, MODEL_CHANGE, RANK_CHANGE, THINKING_ENABLED,
@@ -752,7 +756,7 @@ MAX_ITERATIONS_WORK or WALL_LIMIT → review(failed)
   → retry: update memory + model control + re-run (new SAM)
   → reflect: diagnose, return REFLECTION
 
-MAX_RETRIES_EXHAUSTED (default 3) caps delay/retry rounds after
+MAX_RETRIES_EXHAUSTED (default 20) caps delay/retry rounds after
 LOOP_EXHAUSTED to prevent infinite recursion. Each retry spawns a new SAM.
 MAX_RETRIES_REJECTED (default 3) is the parallel cap on done-claim
 rejections within one SAM.
@@ -942,13 +946,12 @@ All optional, all hints for prescan (overridable by review on retry):
 | Field | Format | Default | Purpose |
 |-------|--------|---------|---------|
 | `Rank` | `Rank: N` | prescan decides | Task difficulty (0-5), controls worker model selection |
-| `Timeout` | `Timeout: N` | per-rank | Wall limit seconds (own time) |
+| `ThinkTime` | `ThinkTime: N` | none (no limit) | LLM time cap per SAM in seconds, excludes bash/tool time. -1 = no limit. Inherits to subtasks. (`Timeout` accepted as deprecated alias) |
 | `BashTime` | `BashTime: N` | MAX_BASH_TIME (300) | Per-bash-call cap (-1 = none) |
-| `ThinkTime` | `ThinkTime: N` | per-rank WALL_LIMIT | LLM time cap per attempt (-1 = none). Propagates to subtasks. |
 | `Skills` | `Skills: a, b` | prescan decides | Comma-separated skill names |
 | `ForceModel` | `ForceModel: name` | (none) | Pin worker to exact model name (bypasses rank selection) |
 | `ControlModel` | `ControlModel: name or N` | highest | Pin prescan/review/reflect model. Name = exact model, N = highest at-or-below rank N. Rank < 0 models use text-only review path. |
-| `Thinking` | `Thinking: N` | off | Force thinking mode with budget N tokens from start (not just on retry) |
+| ~~`Thinking`~~ | removed | — | Thinking is controlled via model selection (rank.yaml `thinkable: true` + `max_thinking_budget`), not per-task metadata |
 | `NoMemory` | `NoMemory: on\|off` | off | When on, task does not read global memory and does not append to global history (clean-room run, no cross-task feedback). Does NOT affect TaskGroup memory. |
 | `TaskGroup` | `TaskGroup: name` | (none) | Opt-in cross-task memory with structured ledger. See **TaskGroup Memory** below. Independent of NoMemory. |
 | `CommonHome` | `CommonHome: ro\|rw\|disable` | rw | Mount F/home → /home. rw = persistent writes (default). ro = read-only (tmpfs absorbs writes to image paths but NOT to bind mounts — ro /home will error on writes). disable = no mount. Portal symlinks ~/.local and ~/.cache to /tmp to prevent cross-run pollution. |
@@ -1016,13 +1019,14 @@ Per-job env overrides (benchmarks / parallel runs):
 | `FALLBACK_HIGHEST` | (required) | Fallback model when rank system unavailable (prescan, review, evolution, ask) |
 | `FALLBACK_WORKING` | (required) | Fallback model for worker agents when rank system unavailable |
 | `SCIFI_MODEL` | (required) | Fixed model group for SciFi (outside container, no Pam) |
-| `MAX_ITERATIONS_WORK` | 50 | Worker iter cap per SAM |
-| `MAX_ITERATIONS_REVIEW_DONE` | 50 | Done-case reviewer iter cap |
-| `MAX_ITERATIONS_REVIEW_FAIL` | 10 | Failed-case reviewer iter cap |
-| `MAX_ITERATIONS_REFLECT` | 15 | Reflect (diagnostic) agent iter cap |
+| `MAX_ITERATIONS_WORK` | 25 | Non-thinking worker iter cap per SAM |
+| `MAX_ITERATIONS_WORK_THINK` | 25 | Thinking worker iter cap per SAM (auto-detected) |
+| `MAX_ITERATIONS_REVIEW_DONE` | 30 | Done-case reviewer iter cap |
+| `MAX_ITERATIONS_REVIEW_FAIL` | 30 | Failed-case reviewer iter cap |
+| `MAX_ITERATIONS_REFLECT` | 10 | Reflect (diagnostic) agent iter cap |
 | `MAX_RETRIES_REJECTED` | 3 | Max done-claim rejection retries before reflect (within SAM) |
-| `MAX_RETRIES_EXHAUSTED` | 3 | Max LOOP_EXHAUSTED → retry rounds (each spawns new SAM) |
-| `CHECKPOINT_EVERY` | 5 | Re-grounding interval |
+| `MAX_RETRIES_EXHAUSTED` | 20 | Max LOOP_EXHAUSTED → retry rounds (each spawns new SAM) |
+| `RECAP_EVERY` | 5 | Re-grounding interval |
 | `MAX_CONTEXT` | 80 | Max messages before trimming |
 | `MAX_DEPTH` | 5 | Max subtask nesting |
 | `MAX_PARALLEL_AGENTS` | 4 | Concurrent subtask limit |
@@ -1030,7 +1034,7 @@ Per-job env overrides (benchmarks / parallel runs):
 | `TOTAL_WALL_PER_RANK` | 2700,2700,2700,2700,2700,2700 | Per-rank total wall limit (incl. bash). Uniform 45 min cap. |
 | `ERROR_LIMIT` | 5 | Consecutive API errors before pam blacklists the worker model (sec 6.8) |
 | `NUDGE_LIMIT` | 5 | Consecutive no-tool-call / malformed-tool turns before blacklist (sec 6.8) |
-| `TOOL_RESULT_CAP` | 10000 | Chars kept of bash/read_file tool result (head + last 5 lines) |
+| `TOOL_RESULT_CAP` | 10000 | Tool result truncation cap (line-based head+tail). full_output=true uses TOOL_RESULT_CAP_FULL (30000) |
 | `SKILLS_DIR` | ./skills | Skill library path |
 | `MAX_EVOLVE_ITER` | 20 | Evolution iteration limit |
 
@@ -1042,7 +1046,9 @@ constants. Documented here for future study.
 | Constant | Value | History |
 |----------|-------|---------|
 | `ATTEMPT_HEADER` | `True` | Writes `## Attempt N` markdown headers between SAM-attempt feedback blocks. The chain-glue prompt depends on this format ("LATEST Attempt block"). All historical bench data ran with this on; no controlled comparison exists. |
-| `DYNAMIC_MAX_ITER` | `False` (experimental) | When set, prescan asks the planner for a per-task iter budget (5..MAX_ITERATIONS_WORK) based on task complexity. Code path retained behind the flag for a future study — could let trivial tasks finish in fewer iters and free wall budget. **Next-study candidate.** Set in driver.py to enable. |
+| `PRESCAN_MODE` | `metadata` | `metadata` (deterministic) or `llm` (multi-turn LLM with read-only tools). Replaced `DYNAMIC_MAX_ITER`. |
+| `PRESCAN_MODEL` | `gemma4` | Model for LLM prescan. Think/non-think determined by model. Fallback: task ControlModel → PRESCAN_MODEL → pam.highest(). |
+| `DEFAULT_RANK` | `3` | Default rank when task has no Rank: in frontmatter (metadata mode). |
 
 ### Studied features (tried, no longer enabled)
 
@@ -1112,13 +1118,14 @@ ENV.sh (host)
 | `FALLBACK_HIGHEST` | model group name | portal.py (driver, evolution, ask) | driver.py→Pam, evolution.py, ask.py |
 | `FALLBACK_WORKING` | model group name | portal.py (driver) | driver.py→Pam |
 | `SCIFI_MODEL` | model group name | (not passed — SciFi runs on host) | SciFi (os.environ) |
-| `MAX_ITERATIONS_WORK` | `50` | portal.py (driver) | driver.py |
-| `MAX_ITERATIONS_REVIEW_DONE` | `50` | portal.py (driver) | driver.py |
-| `MAX_ITERATIONS_REVIEW_FAIL` | `10` | portal.py (driver) | driver.py |
-| `MAX_ITERATIONS_REFLECT` | `15` | portal.py (driver) | driver.py |
+| `MAX_ITERATIONS_WORK` | `25` | portal.py (driver) | driver.py |
+| `MAX_ITERATIONS_WORK_THINK` | `25` | portal.py (driver) | driver.py |
+| `MAX_ITERATIONS_REVIEW_DONE` | `30` | portal.py (driver) | driver.py |
+| `MAX_ITERATIONS_REVIEW_FAIL` | `30` | portal.py (driver) | driver.py |
+| `MAX_ITERATIONS_REFLECT` | `10` | portal.py (driver) | driver.py |
 | `MAX_RETRIES_REJECTED` | `3` | portal.py (driver) | driver.py |
-| `MAX_RETRIES_EXHAUSTED` | `3` | portal.py (driver) | driver.py |
-| `CHECKPOINT_EVERY` | `5` | portal.py (driver) | driver.py |
+| `MAX_RETRIES_EXHAUSTED` | `20` | portal.py (driver) | driver.py |
+| `RECAP_EVERY` | `5` | portal.py (driver) | driver.py |
 | `MAX_CONTEXT` | `80` | portal.py (driver) | driver.py |
 | `MAX_DEPTH` | `5` | portal.py (driver) | driver.py |
 | `MAX_PARALLEL_AGENTS` | `4` | portal.py (driver) | driver.py |

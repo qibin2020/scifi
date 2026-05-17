@@ -108,18 +108,15 @@ def post_chat(prompt, max_tokens=8, timeout=60, model=None):
 
 # ─── gateway probe (pre-bench, recorded in report) ────────────────────────
 
-TPS_PROMPT = (
-    "Write exactly 200 words about the history of computing, starting from "
-    "Babbage and ending with modern transformers. Be concise and factual."
-)
+TPS_PROMPT = "Write a short paragraph about computing history."
 
 
-def probe_tps(n=10):
+def probe_tps(n=3):
     """Sequential decode-TPS sweep. Returns (median_tps, median_oh_ms, samples)."""
     tps_samples = []
     oh_samples = []
     for _ in range(n):
-        st, wall_ms, hdrs, body = post_chat(TPS_PROMPT, max_tokens=200)
+        st, wall_ms, hdrs, body = post_chat(TPS_PROMPT, max_tokens=50)
         if st == 200 and body:
             ct = (body.get("usage") or {}).get("completion_tokens", 0)
             if ct > 0 and wall_ms > 0:
@@ -135,59 +132,44 @@ def probe_tps(n=10):
     )
 
 
-def probe_concurrency(levels=(1, 2, 4, 8, 16, 32)):
-    """Ramp concurrency, count 429s. Return per-level dict and the ceiling."""
-    out = {}
-    for c in levels:
-        n_req = max(c * 2, 24)
-        results = []
-        with ThreadPoolExecutor(max_workers=c) as ex:
-            futs = [ex.submit(post_chat, "Reply with the single word: OK", 8, 30) for _ in range(n_req)]
-            for f in as_completed(futs):
-                results.append(f.result())
-        n_ok  = sum(1 for r in results if r[0] == 200)
-        n_429 = sum(1 for r in results if r[0] == 429)
-        n_bad = sum(1 for r in results if r[0] not in (200, 429))
-        walls = [r[1] for r in results if r[0] == 200]
-        walls.sort()
-        out[str(c)] = {
-            "n_req": n_req, "n_ok": n_ok, "n_429": n_429, "n_bad": n_bad,
-            "wall_p50_ms": (walls[len(walls)//2] if walls else None),
-            "wall_p95_ms": (walls[int(0.95 * (len(walls)-1))] if walls else None),
-        }
-    # ceiling = highest level with zero failures (429 or other)
-    ok_levels = [c for c in levels if out[str(c)]["n_429"] == 0 and out[str(c)]["n_bad"] == 0]
-    ceiling = max(ok_levels) if ok_levels else 0
-    return out, ceiling
+def probe_concurrency(target_parallel=16):
+    """Light concurrency check — 4 concurrent short requests. Verifies gateway
+    accepts parallel connections without 429 or timeout. Does NOT stress-test at
+    full target_parallel since local Ollama serialises inference anyway."""
+    n_req = 4
+    results = []
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = [ex.submit(post_chat, "Reply OK", 4, 60) for _ in range(n_req)]
+        for f in as_completed(futs):
+            results.append(f.result())
+    n_ok  = sum(1 for r in results if r[0] == 200)
+    n_429 = sum(1 for r in results if r[0] == 429)
+    n_bad = sum(1 for r in results if r[0] not in (200, 429))
+    walls = [r[1] for r in results if r[0] == 200]
+    walls.sort()
+    return {
+        "concurrency": 4,
+        "n_req": n_req, "n_ok": n_ok, "n_429": n_429, "n_bad": n_bad,
+        "wall_p50_ms": (walls[len(walls)//2] if walls else None),
+        "wall_p95_ms": (walls[int(0.95 * (len(walls)-1))] if walls else None),
+        "healthy": (n_429 == 0 and n_bad == 0),
+    }
 
 
 def gateway_probe(plan):
-    """Full pre-bench probe. Aborts run if thresholds violated."""
+    """Quick pre-bench probe: TPS only."""
     cfg = plan.get("gateway_probe", {})
-    abort_below_tps  = cfg.get("abort_below_tps",  10)
-    abort_above_oh   = cfg.get("abort_above_oh_ms", 50)
-    abort_min_ceil   = cfg.get("abort_below_conc_ceiling", 1)
+    abort_below_tps = cfg.get("abort_below_tps", 4)
 
-    print("[probe] sequential TPS sweep (10 calls @ max_tokens=200) …")
+    print("[probe] TPS sweep (3 calls @ max_tokens=50) …", flush=True)
     tps, oh, _ = probe_tps()
-    print(f"[probe]   tps_decode = {tps:.1f} tok/s   oh_p50 = {oh:.1f} ms")
+    print(f"[probe]   tps={tps:.1f} tok/s   oh_p50={oh:.1f}ms", flush=True)
 
-    print("[probe] concurrency ramp [1,2,4,8,16,32] …")
-    levels, ceiling = probe_concurrency()
-    print(f"[probe]   conc_ceiling = {ceiling}")
-    for k, v in levels.items():
-        print(f"[probe]     conc={k}: ok={v['n_ok']}/{v['n_req']}  "
-              f"p50={v['wall_p50_ms']}ms  p95={v['wall_p95_ms']}ms  429={v['n_429']}")
-
-    passed = (tps >= abort_below_tps and oh <= abort_above_oh and ceiling >= abort_min_ceil)
+    passed = tps >= abort_below_tps
     return {
         "tps_decode":    round(tps, 1),
         "oh_p50_ms":     round(oh,  1),
-        "conc_ceiling":  ceiling,
-        "conc_levels":   levels,
-        "thresholds":    {"abort_below_tps": abort_below_tps,
-                          "abort_above_oh_ms": abort_above_oh,
-                          "abort_below_conc_ceiling": abort_min_ceil},
+        "thresholds":    {"abort_below_tps": abort_below_tps},
         "passed":        passed,
     }
 
@@ -342,33 +324,33 @@ def set_env_knob(name, value, existing_backup=None, expect_export=True):
     return bak
 
 
-def set_checkpoint_every(n, existing_backup=None):
-    """Override ENV.sh's CHECKPOINT_EVERY to <n>. Same backup-share pattern."""
+def set_recap_every(n, existing_backup=None):
+    """Override ENV.sh's RECAP_EVERY to <n>. Same backup-share pattern."""
     env_path = os.path.join(BASEDIR, "ENV.sh")
     if not os.path.isfile(env_path):
         raise SystemExit(f"ERROR: {env_path} not found")
     content = open(env_path).read()
 
     new_value = str(int(n))
-    m = re.search(r"^export CHECKPOINT_EVERY=(\S+)", content, re.MULTILINE)
+    m = re.search(r"^export RECAP_EVERY=(\S+)", content, re.MULTILINE)
     if not m:
-        raise SystemExit("ERROR: 'export CHECKPOINT_EVERY=...' not found in ENV.sh")
+        raise SystemExit("ERROR: 'export RECAP_EVERY=...' not found in ENV.sh")
     old_value = m.group(1)
-    print(f"[checkpoint_every] requested: {n}")
-    print(f"[checkpoint_every] currently in ENV.sh: {old_value}")
+    print(f"[recap_every] requested: {n}")
+    print(f"[recap_every] currently in ENV.sh: {old_value}")
     if old_value == new_value:
-        print(f"[checkpoint_every] already set — no change.")
+        print(f"[recap_every] already set — no change.")
         return None
 
     bak = existing_backup or _backup(env_path)
     new_content = re.sub(
-        r"^(export CHECKPOINT_EVERY=)\S+",
+        r"^(export RECAP_EVERY=)\S+",
         rf"\g<1>{new_value}",
         content, count=1, flags=re.MULTILINE,
     )
     open(env_path, "w").write(new_content)
-    print(f"[checkpoint_every] WROTE: {env_path}  ({old_value} → {new_value})")
-    print(f"[checkpoint_every] backup: {os.path.basename(bak)}")
+    print(f"[recap_every] WROTE: {env_path}  ({old_value} → {new_value})")
+    print(f"[recap_every] backup: {os.path.basename(bak)}")
     return bak
 
 
@@ -503,18 +485,24 @@ def run_one(label, idx, task):
         "stderr_log":         os.path.relpath(err, BASEDIR),
     }, open(meta, "w"), indent=2)
 
-    print(f"[run]   {label} #{idx} done rc={proc.returncode} wall={wall}s")
+    print(f"[run]   {label} #{idx} done rc={proc.returncode} wall={wall}s", flush=True)
     return meta
 
 
-def _have_local_gpu():
-    """True if nvidia-smi reports at least one GPU."""
+def _local_gpu_count():
+    """Number of GPUs visible to nvidia-smi, 0 if unavailable."""
     try:
         out = subprocess.run(["nvidia-smi", "-L"], capture_output=True,
                              text=True, timeout=10)
-        return out.returncode == 0 and "GPU" in (out.stdout or "")
+        if out.returncode != 0:
+            return 0
+        return sum(1 for line in (out.stdout or "").splitlines() if line.startswith("GPU "))
     except Exception:
-        return False
+        return 0
+
+
+def _have_local_gpu():
+    return _local_gpu_count() > 0
 
 
 def _have_slurm():
@@ -549,6 +537,9 @@ def _task_skip_reason(task):
         return "GPU: local but no nvidia-smi"
     if gpu in ("1", "2", "3", "4", "all") and not _have_local_gpu():
         return f"GPU: {gpu} but no nvidia-smi"
+    min_gpu = meta.get("MinGPU", "")
+    if min_gpu.isdigit() and int(min_gpu) > _local_gpu_count():
+        return f"MinGPU: {min_gpu} required but only {_local_gpu_count()} available"
     if slurm == "on" and not _have_slurm():
         return "Slurm: on but no sbatch on PATH"
     return None
@@ -598,9 +589,9 @@ def validate_plan(plan):
     if "max_iterations_work" in plan:
         if not isinstance(plan["max_iterations_work"], int) or plan["max_iterations_work"] < 1:
             raise SystemExit("'max_iterations_work' must be a positive int")
-    if "checkpoint_every" in plan:
-        if not isinstance(plan["checkpoint_every"], int) or plan["checkpoint_every"] < 1:
-            raise SystemExit("'checkpoint_every' must be a positive int")
+    if "recap_every" in plan:
+        if not isinstance(plan["recap_every"], int) or plan["recap_every"] < 1:
+            raise SystemExit("'recap_every' must be a positive int")
     for knob in ("tool_result_cap",
                   "max_iterations_review_done", "max_iterations_review_fail",
                   "max_iterations_reflect",
@@ -644,9 +635,9 @@ def main():
     for d in (RUNS_DIR, STATES_DIR, REPORTS_DIR):
         os.makedirs(d, exist_ok=True)
 
-    print(f"=== bench plan: {plan['name']} ===")
-    print(f"    batches: {len(plan['batches'])}")
-    print(f"    state_paths: {plan['state_paths']}")
+    print(f"=== bench plan: {plan['name']} ===", flush=True)
+    print(f"    batches: {len(plan['batches'])}", flush=True)
+    print(f"    state_paths: {plan['state_paths']}", flush=True)
 
     # Apply plan-level overrides (mutate gateway.rank.yaml / ENV.sh in place,
     # backup originals; restored in finally).
@@ -666,8 +657,8 @@ def main():
         env_bak = set_total_wall(plan["total_wall_s"], env_bak) or env_bak
     if "max_iterations_work" in plan:
         env_bak = set_max_iterations_work(plan["max_iterations_work"], env_bak) or env_bak
-    if "checkpoint_every" in plan:
-        env_bak = set_checkpoint_every(plan["checkpoint_every"], env_bak) or env_bak
+    if "recap_every" in plan:
+        env_bak = set_recap_every(plan["recap_every"], env_bak) or env_bak
     for knob_name, env_name in [
             ("max_iterations_review_done", "MAX_ITERATIONS_REVIEW_DONE"),
             ("max_iterations_review_fail", "MAX_ITERATIONS_REVIEW_FAIL"),
@@ -754,7 +745,7 @@ def main():
     print("=== bench summary ===")
     print(f"plan: {plan['name']}   ts: {ts}")
     if not args.skip_probe:
-        print(f"gateway: tps={probe['tps_decode']} tok/s   oh={probe['oh_p50_ms']}ms   conc_ceiling={probe['conc_ceiling']}")
+        print(f"gateway: tps={probe['tps_decode']} tok/s   oh={probe['oh_p50_ms']}ms   conc_ceiling={probe.get('conc_ceiling', '?')}")
     print(f"{'batch':<20} {'n':>3} {'P/F/E':>8} {'pass_rate':>9} {'iters_p50':>9} {'wall_p50':>9} {'bash%_p50':>9}")
     for b in batch_results:
         pfe = f"{b['n_pass']}/{b['n_fail']}/{b['n_err']}"

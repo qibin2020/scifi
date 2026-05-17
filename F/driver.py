@@ -44,23 +44,26 @@ from task_parser import parse_task, public_meta, TaskFormatError
 GATEWAY = os.environ.get("GATEWAY_URL", "http://localhost:4000")
 FALLBACK_HIGHEST = os.environ["FALLBACK_HIGHEST"]
 FALLBACK_WORKING = os.environ["FALLBACK_WORKING"]
-# Per-agent iter caps (4 vars; each agent uses its own cap independently).
-MAX_ITERATIONS_WORK        = int(os.environ.get("MAX_ITERATIONS_WORK",        "50"))
-MAX_ITERATIONS_REVIEW_DONE = int(os.environ.get("MAX_ITERATIONS_REVIEW_DONE", "50"))
-MAX_ITERATIONS_REVIEW_FAIL = int(os.environ.get("MAX_ITERATIONS_REVIEW_FAIL", "10"))
-MAX_ITERATIONS_REFLECT     = int(os.environ.get("MAX_ITERATIONS_REFLECT",     "15"))
+# Per-agent iter caps. Worker has two caps: non-thinking (fast, many retries)
+# and thinking (deep, fewer retries). Review/reflect have fixed caps.
+MAX_ITERATIONS_WORK        = int(os.environ.get("MAX_ITERATIONS_WORK",        "25"))
+MAX_ITERATIONS_WORK_THINK  = int(os.environ.get("MAX_ITERATIONS_WORK_THINK",  "25"))
+MAX_ITERATIONS_REVIEW_DONE = int(os.environ.get("MAX_ITERATIONS_REVIEW_DONE", "30"))
+MAX_ITERATIONS_REVIEW_FAIL = int(os.environ.get("MAX_ITERATIONS_REVIEW_FAIL", "30"))
+MAX_ITERATIONS_REFLECT     = int(os.environ.get("MAX_ITERATIONS_REFLECT",     "10"))
 # Per-path retry caps (2 vars; independent counters for the two failure paths).
 MAX_RETRIES_REJECTED  = int(os.environ.get("MAX_RETRIES_REJECTED",  "3"))
-MAX_RETRIES_EXHAUSTED = int(os.environ.get("MAX_RETRIES_EXHAUSTED", "3"))
-# When DYNAMIC_MAX_ITER=1, prescan asks the planner for a per-task iter budget
-# (5..MAX_ITERATIONS_WORK) based on task complexity. _run_sam clamps it.
-DYNAMIC_MAX_ITER = os.environ.get("DYNAMIC_MAX_ITER", "0") == "1"
+MAX_RETRIES_EXHAUSTED = int(os.environ.get("MAX_RETRIES_EXHAUSTED", "20"))
+# Prescan: metadata (deterministic, default) or llm (multi-turn with read-only tools).
+PRESCAN_MODE  = os.environ.get("PRESCAN_MODE", "metadata")
+PRESCAN_MODEL = os.environ.get("PRESCAN_MODEL", "gemma4")
+DEFAULT_RANK  = int(os.environ.get("DEFAULT_RANK", "3"))
 # _append_feedback writes "## Attempt N" headers between SAM-attempt blocks
 # in the review-feedback file. Provides explicit attempt count + markdown
 # structure for the chain-glue framing ("LATEST Attempt block", etc.) to
 # refer to. The chain-glue prompt depends on this format.
 ATTEMPT_HEADER = True
-CHECKPOINT_EVERY = int(os.environ.get("CHECKPOINT_EVERY", "5"))
+RECAP_EVERY = int(os.environ.get("RECAP_EVERY", "5"))
 MAX_CONTEXT = int(os.environ.get("MAX_CONTEXT", "80"))
 MAX_DEPTH = int(os.environ.get("MAX_DEPTH", "5"))
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL_AGENTS", "4"))
@@ -79,8 +82,9 @@ CAP_GLOBAL = int(os.environ.get("CAP_GLOBAL", "1000"))
 CAP_TASK = int(os.environ.get("CAP_TASK", "4000"))
 CAP_TASKGROUP = int(os.environ.get("CAP_TASKGROUP", "3000"))
 
-# Tool-result truncation cap (chars). Head + last 5 lines are kept.
-TOOL_RESULT_CAP = int(os.environ.get("TOOL_RESULT_CAP", "10000"))
+# Tool-result truncation: line-based head+tail (Codex-style), char hard cap.
+TOOL_RESULT_CAP      = int(os.environ.get("TOOL_RESULT_CAP",      "10000"))
+TOOL_RESULT_CAP_FULL = int(os.environ.get("TOOL_RESULT_CAP_FULL", "30000"))
 
 # Robustness thresholds. ERROR_LIMIT/NUDGE_LIMIT trigger session blacklist for
 # the worker model when a model is fundamentally broken (wrong creds, malformed
@@ -118,14 +122,21 @@ def _resolve_control_model(control_model):
     If None: returns pam.highest() (default behavior)."""
     if not control_model:
         return pam.highest(usage=_usage)
-    # Check if it's a rank number
     try:
         rank = int(control_model)
         return pam.select(rank, usage=_usage)["name"]
     except (ValueError, TypeError):
         pass
-    # It's a model name — use force_model to bypass selection
     return pam.select(0, usage=_usage, force_model=control_model)["name"]
+
+
+def _resolve_prescan_model(control_model):
+    """Prescan model: task ControlModel → PRESCAN_MODEL env → pam.highest()."""
+    if control_model:
+        return _resolve_control_model(control_model)
+    if PRESCAN_MODEL:
+        return pam.select(0, usage=_usage, force_model=PRESCAN_MODEL)["name"]
+    return pam.highest(usage=_usage)
 
 
 # ============================================================
@@ -410,155 +421,77 @@ def _get_mem_lock(task_dir):
 
 
 # ============================================================
-# PRESCAN (highest model, single-turn, determines everything)
+# PRESCAN
 # ============================================================
+# PRESCAN_MODE=metadata: deterministic (frontmatter only, no LLM)
+# PRESCAN_MODE=llm:      multi-turn LLM with read-only tools
+#
+# Both modes parse frontmatter first. LLM mode adds rank estimation,
+# subtask dependency analysis, and skill selection on top.
 
-def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
-    """Analyze task: rank, subtask deps, context assembly.
-    Uses highest model — this call determines the entire execution.
-    Returns {"rank": N, "subtasks": [...], "context": {file: str}}
-    """
-    # Deterministic metadata extraction via task_parser
-    try:
-        parsed = parse_task(task_content)
-        meta = parsed["meta"]
-    except TaskFormatError:
-        # Fallback for malformed files (e.g. nu2flows): empty meta, still run
-        meta = {}
+PRESCAN_SYSTEM = """\
+You are a prescan agent. Analyze the task and produce an execution plan.
+
+You can read files to understand the task. When ready, call `plan`.
+
+Decide:
+- rank: difficulty estimate (0=trivial, {max_rank}=hardest)
+- subtasks: if multiple .md files exist, determine execution order and dependencies
+- skills: which available skills the task needs
+
+Rules:
+- If the task declares Rank: N, use that rank
+- If the task declares Skills:, respect those suggestions
+- depends_on must form a tree (no cycles)
+- Only include skills the task actually needs
+- Keep analysis brief — you are planning, not solving"""
+
+PRESCAN_TOOLS = [
+    {"type": "function", "function": {"name": "read_file",
+        "description": "Read a file in the task directory.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "offset": {"type": "integer", "description": "Start position in chars"},
+            "limit": {"type": "integer", "description": "Max chars to return"}},
+            "required": ["path"]}}},
+    {"type": "function", "function": {"name": "memory_read",
+        "description": "Read persistent task memory.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "plan",
+        "description": "Submit the execution plan.",
+        "parameters": {"type": "object", "properties": {
+            "rank": {"type": "integer", "description": "Difficulty 0-N"},
+            "subtasks": {"type": "array", "items": {"type": "object", "properties": {
+                "file": {"type": "string"},
+                "rank": {"type": "integer"},
+                "depends_on": {"type": "array", "items": {"type": "string"}}}}},
+            "skills": {"type": "array", "items": {"type": "string"}}},
+            "required": ["rank"]}}},
+]
+
+
+def _prescan_metadata(meta, task_dir, task_file, md_files, global_memory, memory):
+    """Build a deterministic plan from frontmatter only. No LLM."""
     rank_match = meta.get("Rank")
-    timeout_match = meta.get("Timeout")
-    bash_time_match = meta.get("BashTime")
-    think_time_match = meta.get("ThinkTime")
+    default_rank = int(os.environ.get("DEFAULT_RANK", str(DEFAULT_RANK)))
     skills_match = meta.get("Skills")
-    force_model_match = meta.get("ForceModel")
-    control_match = meta.get("ControlModel")
-    thinking_match = meta.get("Thinking")
-    nomemory_val = meta.get("NoMemory", "")
-    no_memory = nomemory_val.lower() in ("on", "true", "yes", "1")
-    task_group = meta.get("TaskGroup")
     suggested_skills = []
     if skills_match:
         suggested_skills = [s.strip() for s in skills_match.split(',') if s.strip()]
 
-    # Find .md files in task_dir (potential subtasks, excluding self)
-    md_files = []
-    if os.path.isdir(task_dir):
-        md_files = sorted(f for f in os.listdir(task_dir)
-                         if f.endswith('.md') and not f.startswith('.')
-                         and f != task_file)
+    # Subtasks: listed as independent (no dependency ordering without LLM)
+    subtasks = [{"file": f, "rank": int(rank_match) if rank_match else default_rank,
+                 "depends_on": []} for f in md_files]
 
-    # Category: group by prefix (A.B.md → category A)
+    # Subtask context assembly
     categories = {}
     for f in md_files:
         parts = f.rsplit('.md', 1)[0].split('.')
         if len(parts) >= 2:
-            cat = parts[0]
-            categories.setdefault(cat, []).append(f)
-
-    mr = pam.max_rank()
-    cm = control_match  # already a string or None
-    model = _resolve_control_model(cm)
-
-    # Self-declared fast path: skip LLM call when rank is hardcoded and there
-    # are no subtasks. Disabled when DYNAMIC_MAX_ITER=1 — phase 3 needs the
-    # planner's actual look at task content + memory + global memory to
-    # suggest a per-task iter budget; the fast path would defeat that.
-    if rank_match and not md_files and not DYNAMIC_MAX_ITER:
-        result = {
-            "rank": int(rank_match),
-            "subtasks": [],
-            "context": {},
-            "skills": [s for s in suggested_skills if s in _skills],
-            "source": "self-declared",
-        }
-        if timeout_match:
-            result["wall_limit"] = int(timeout_match)
-        if bash_time_match:
-            result["bash_time"] = int(bash_time_match)
-        if think_time_match:
-            result["think_time"] = int(think_time_match)
-        if force_model_match:
-            result["force_model"] = force_model_match
-        if control_match:
-            result["control_model"] = control_match
-        if thinking_match:
-            result["thinking"] = True
-            result["thinking_budget"] = int(thinking_match)
-        result["no_memory"] = no_memory
-        result["task_group"] = task_group
-        return result
-
-    # Single-turn LLM call for analysis
-    skills_info = ""
-    if _skill_catalog:
-        skills_info = (f"Available skills:\n{_skill_catalog}\n\n"
-            f"Task suggests skills: {suggested_skills or '(none)'}\n\n")
-    iter_field = (
-        '"suggested_max_iter": <5..50 — agent-loop iteration budget>, '
-        if DYNAMIC_MAX_ITER else "")
-    iter_rule = (
-        f"- suggested_max_iter: estimate how many agent-loop iterations this "
-        f"task needs; trivial tasks (e.g. echo a fact) ~5-10, simple builds "
-        f"~10-20, multi-step builds with debug ~20-35, hard creative tasks "
-        f"with unknown obstacles ~35-50. Bound: 5 ≤ N ≤ {MAX_ITERATIONS_WORK}.\n"
-        if DYNAMIC_MAX_ITER else "")
-    prompt = (
-        f"Analyze this SAM task. Reply with ONLY valid JSON.\n\n"
-        f"Task content:\n{task_content[:3000]}\n\n"
-        f"Available .md files in directory: {md_files}\n\n"
-        f"Categories (files sharing prefix): {dict(categories)}\n\n"
-        f"{skills_info}"
-        f"Reply format:\n"
-        f'{{"rank": <0-{mr} difficulty>, '
-        f'{iter_field}'
-        f'"subtasks": [{{"file": "name.md", "rank": <0-{mr}>, "depends_on": ["other.md"]}}], '
-        f'"skills": ["skill_name", ...]}}\n\n'
-        f"Rules:\n"
-        f"- rank 0 = trivial, {mr} = complex\n"
-        f"{iter_rule}"
-        f"- depends_on lists files that must complete first\n"
-        f"- dependencies must form a tree (no cycles)\n"
-        f"- if no subtasks found, return empty list\n"
-        f"- skills: include only skills the task actually needs\n"
-        f"- if task self-declares Rank: N, use that rank\n"
-        f"- if task self-declares Skills:, respect those suggestions"
-    )
-
-    try:
-        client = OpenAI(base_url=f"{GATEWAY}/v1", api_key="na")
-        resp = client.chat.completions.create(
-            model=model, max_tokens=500,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        with _usage_lock:
-            _usage[model] = _usage.get(model, 0) + 1
-        raw = resp.choices[0].message.content.strip()
-        _cam("api_request", caller="prescan", model=model,
-             prompt=prompt, response=raw, **_response_meta(resp))
-        # Extract JSON from response (may be wrapped in ```json...```)
-        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if json_match:
-            plan = json.loads(json_match.group())
-        else:
-            plan = {"rank": 1, "subtasks": []}
-    except Exception:
-        plan = {"rank": int(rank_match) if rank_match else 1,
-                "subtasks": []}
-
-    rank = int(plan.get("rank", 1))
-    subtasks = plan.get("subtasks", [])
-    if DYNAMIC_MAX_ITER:
-        smi = plan.get("suggested_max_iter")
-        if isinstance(smi, (int, float)) and smi > 0:
-            # _run_sam will clamp to [5, MAX_ITERATIONS_WORK]
-            pass
-        else:
-            smi = 10 + 10 * max(0, min(rank, 4))  # rank-derived fallback
-
-    # Assemble context for each subtask (capped)
+            categories.setdefault(parts[0], []).append(f)
     context = {}
     for st in subtasks:
-        fname = st.get("file", "")
+        fname = st["file"]
         parts = []
         if global_memory:
             parts.append(f"---\nGlobal Experience:\n{global_memory[:CAP_GLOBAL]}")
@@ -571,42 +504,159 @@ def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
             parts.append(f"---\nParent Memory:\n{memory[:CAP_MEMORY]}")
         context[fname] = "\n".join(parts)
 
-    # Skills: from prescan LLM output, validated against loaded skills
-    skills = [s for s in plan.get("skills", suggested_skills) if s in _skills]
-
-    # Auto-inject default env skill if none declared.
-    # DEFAULT_ENV_SKILL (from ENV.sh) picks which one; if it's missing from
-    # _skills (user deleted it), skill_context rendering adds a hardcoded
-    # fallback prompt pointing at /tmp.
+    skills = [s for s in suggested_skills if s in _skills]
     if not (set(skills) & set(_ENV_SKILLS)):
         default_env = os.environ.get("DEFAULT_ENV_SKILL", "temp_env")
         if default_env in _skills:
             skills.append(default_env)
 
-    result = {
-        "rank": max(0, min(rank, mr)),
+    return {
+        "rank": int(rank_match) if rank_match else default_rank,
         "subtasks": subtasks,
         "context": context,
         "skills": skills,
-        "source": "scanned",
+        "source": "metadata",
     }
-    if timeout_match:
-        result["wall_limit"] = int(timeout_match)
-    if bash_time_match:
-        result["bash_time"] = int(bash_time_match)
+
+
+def _prescan_llm(model, task_content, task_dir, task_file, md_files,
+                 memory, global_memory, suggested_skills, meta):
+    """Multi-turn LLM prescan with read-only tools. Returns plan dict or None."""
+    mr = pam.max_rank()
+    system = PRESCAN_SYSTEM.format(max_rank=mr)
+
+    skills_info = ""
+    if _skill_catalog:
+        skills_info = f"\nAvailable skills:\n{_skill_catalog}"
+        if suggested_skills:
+            skills_info += f"\nTask suggests: {suggested_skills}"
+
+    categories = {}
+    for f in md_files:
+        parts = f.rsplit('.md', 1)[0].split('.')
+        if len(parts) >= 2:
+            categories.setdefault(parts[0], []).append(f)
+
+    user_msg = (
+        f"Task content:\n{task_content[:3000]}\n\n"
+        f"Files in directory: {md_files or '(none)'}\n"
+        f"Categories: {dict(categories) or '(none)'}\n"
+        f"{skills_info}\n\n"
+        f"Read files if needed, then call `plan`.")
+
+    iter_cap = 5 + len(md_files)
+    _cam("prescan_llm_start", model=model, iter_cap=iter_cap)
+
+    args = _run_agent_loop(
+        system, PRESCAN_TOOLS, _execute_tool_readonly,
+        task_dir, user_msg, iter_cap, "plan", model, "PRESCAN", depth=0)
+
+    if args is None:
+        return None
+    args.pop("_terminal", None)
+    return args
+
+
+def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
+    """Analyze task and produce execution plan.
+    PRESCAN_MODE=metadata: deterministic (frontmatter only).
+    PRESCAN_MODE=llm: deterministic + LLM with read-only tools.
+    Returns {"rank": N, "subtasks": [...], "context": {}, "skills": [...]}
+    """
+    # --- Deterministic metadata extraction (always) ---
+    try:
+        parsed = parse_task(task_content)
+        meta = parsed["meta"]
+    except TaskFormatError:
+        meta = {}
+    rank_match = meta.get("Rank")
+    think_time_match = meta.get("ThinkTime") or meta.get("Timeout")
+    bash_time_match = meta.get("BashTime")
+    skills_match = meta.get("Skills")
+    force_model_match = meta.get("ForceModel")
+    control_match = meta.get("ControlModel")
+    nomemory_val = meta.get("NoMemory", "")
+    no_memory = nomemory_val.lower() in ("on", "true", "yes", "1")
+    task_group = meta.get("TaskGroup")
+    suggested_skills = []
+    if skills_match:
+        suggested_skills = [s.strip() for s in skills_match.split(',') if s.strip()]
+
+    md_files = []
+    if os.path.isdir(task_dir):
+        md_files = sorted(f for f in os.listdir(task_dir)
+                         if f.endswith('.md') and not f.startswith('.')
+                         and f != task_file)
+
+    # --- Mode dispatch (read from os.environ so _System: overrides apply) ---
+    mode = os.environ.get("PRESCAN_MODE", PRESCAN_MODE)
+    default_rank = int(os.environ.get("DEFAULT_RANK", str(DEFAULT_RANK)))
+    if mode == "llm":
+        model = _resolve_prescan_model(control_match)
+        llm_plan = _prescan_llm(model, task_content, task_dir, task_file,
+                                md_files, memory, global_memory,
+                                suggested_skills, meta)
+        if llm_plan:
+            mr = pam.max_rank()
+            llm_rank = int(llm_plan.get("rank", default_rank))
+            # Metadata Rank takes priority over LLM estimate
+            rank = int(rank_match) if rank_match else max(0, min(llm_rank, mr))
+            subtasks = llm_plan.get("subtasks", [])
+            llm_skills = [s for s in llm_plan.get("skills", suggested_skills) if s in _skills]
+
+            # Subtask context assembly
+            categories = {}
+            for f in md_files:
+                parts = f.rsplit('.md', 1)[0].split('.')
+                if len(parts) >= 2:
+                    categories.setdefault(parts[0], []).append(f)
+            context = {}
+            for st in subtasks:
+                fname = st.get("file", "")
+                parts = []
+                if global_memory:
+                    parts.append(f"---\nGlobal Experience:\n{global_memory[:CAP_GLOBAL]}")
+                cat_prefix = fname.rsplit('.md', 1)[0].split('.')[0] if '.' in fname.rsplit('.md', 1)[0] else ""
+                if cat_prefix and cat_prefix in categories:
+                    for sibling in categories[cat_prefix]:
+                        if sibling != fname:
+                            parts.append(f"---\nCategory sibling ({sibling}): see shared memory")
+                if memory:
+                    parts.append(f"---\nParent Memory:\n{memory[:CAP_MEMORY]}")
+                context[fname] = "\n".join(parts)
+
+            if not (set(llm_skills) & set(_ENV_SKILLS)):
+                default_env = os.environ.get("DEFAULT_ENV_SKILL", "temp_env")
+                if default_env in _skills:
+                    llm_skills.append(default_env)
+
+            result = {
+                "rank": rank,
+                "subtasks": subtasks,
+                "context": context,
+                "skills": llm_skills,
+                "source": "llm",
+            }
+        else:
+            # LLM failed — fall back to metadata
+            result = _prescan_metadata(meta, task_dir, task_file, md_files,
+                                       global_memory, memory)
+            result["source"] = "llm-fallback"
+    else:
+        result = _prescan_metadata(meta, task_dir, task_file, md_files,
+                                   global_memory, memory)
+
+    # --- Apply optional metadata fields (always from frontmatter) ---
     if think_time_match:
         result["think_time"] = int(think_time_match)
+    if bash_time_match:
+        result["bash_time"] = int(bash_time_match)
     if force_model_match:
         result["force_model"] = force_model_match
     if control_match:
         result["control_model"] = control_match
-    if thinking_match:
-        result["thinking"] = True
-        result["thinking_budget"] = int(thinking_match)
     result["no_memory"] = no_memory
     result["task_group"] = task_group
-    if DYNAMIC_MAX_ITER:
-        result["suggested_max_iter"] = int(smi)
     return result
 
 
@@ -723,6 +773,13 @@ pass) — if Expect lists multiple modes or conditions (e.g. "both A and B
 pass"), verify all of them. Calling done after testing only a subset is
 overconfidence; the reviewer will run the omitted check and reject.
 
+CRITICAL: "seen it pass" means you saw the EXPLICIT pass string (e.g.
+"PASSED", "OK", the exact output Expect describes) in the tool result.
+If the expected output is ABSENT — even if there are no errors — that is
+a FAILURE, not a pass. Silent output, missing verdict lines, or truncated
+results without the pass string all mean the check did NOT pass. Do NOT
+call done unless the pass string is literally present in your tool output.
+
 When you call done, include two things in the summary:
 
 1) RAW evidence — the actual command(s) you ran plus the tail of their
@@ -746,8 +803,11 @@ When you call done, include two things in the summary:
    random inputs/seeds to detect fabrication. An accurate reference
    speeds review; a misleading one just invites stricter scrutiny.
 
-Bash output may be truncated for long commands. To get specific results from
-long output, use grep, tail, or redirect to a file and read the parts you need.
+Bash output is truncated by default (head+tail lines, ~10K chars). This is
+enough for most commands. If you need the COMPLETE output (e.g. to find a
+specific error in a long build log), pass full_output=true — but this costs
+3x context budget, so use it sparingly. For targeted lookups in long output,
+prefer grep, tail, or redirect to a file and read the parts you need.
 
 If a fix does not work, diagnose before retrying — read error output, check
 assumptions, and understand why it failed. Do not rewrite code blindly.
@@ -759,6 +819,24 @@ write a small probe with simpler inputs, add print statements to YOUR code
 NARROW your hypothesis (e.g. "I now suspect timing, not bit order"). If
 you can't name a specific suspect, you need more diagnostic, not more
 code variants."""
+
+# Worker-mode-specific addons (appended to SYSTEM_CORE based on model type)
+SYSTEM_WORK_THINK = """\
+
+You have extended reasoning capability. Use it:
+- Plan your approach before writing code. Consider edge cases mentally first.
+- When verify fails, reason about WHY before changing code — wrong hypotheses
+  waste iterations. A thinking iteration spent understanding beats a coding
+  iteration spent guessing.
+- You have fewer iterations but each is more powerful. Make them count."""
+
+SYSTEM_WORK_NONTHINK = """\
+
+You are a fast execution agent. Maximize concrete progress each iteration:
+- Follow a clear loop: read spec, implement, build, test, verify.
+- If a fix doesn't work after 2 attempts, STOP and expand diagnostics:
+  write a small probe, add print statements, vary one parameter at a time.
+  Blind retrying wastes your limited iterations."""
 
 # Conditional system prompt sections, assembled from task metadata
 SYSTEM_HOME = """\
@@ -784,13 +862,12 @@ SYSTEM_SUBAGENT = """\
 - subagent: delegate to a sub-SAM by pointing it at a .md task file"""
 
 
-def _build_system_prompt(meta, has_subtasks=False):
-    """Assemble SYSTEM prompt from core + conditional sections based on metadata.
+def _build_system_prompt(meta, has_subtasks=False, thinking=False):
+    """Assemble SYSTEM prompt from core + worker-mode addon + conditional sections.
     Uses EFFECTIVE_COMMON_* env vars (set by portal.py after isolation override)
     so the prompt matches actual container mounts, not just task metadata."""
-    core = SYSTEM_CORE
-
-    parts = [core]
+    parts = [SYSTEM_CORE]
+    parts.append(SYSTEM_WORK_THINK if thinking else SYSTEM_WORK_NONTHINK)
 
     # Use effective values from portal.py (reflects isolation overrides)
     # Fall back to task metadata if env vars not set (e.g. direct invocation)
@@ -816,183 +893,30 @@ def _build_system_prompt(meta, has_subtasks=False):
 
     return "\n\n".join(parts)
 
-REVIEW_SYSTEM = """\
-You are an independent review agent. Your job is to PROTECT against false positives.
+REVIEW_SYSTEM_UNIFIED = """\
+You are an independent review agent. You receive the worker's transcript
+and decide: is the task done, or does it need another attempt?
 
-CORE PRINCIPLE
-  The worker's claims are HEARSAY. Your OWN tool observations are the only
-  ground truth. Never approve based on what the worker says — only on what
-  YOU observe with your own tools. Workers have been caught writing fake log
-  files, claiming tests pass when they don't, and producing code that doesn't
-  even compile. Assume fabrication is possible until you rule it out.
+PATH A — VERIFY (worker may have succeeded)
+  If the transcript shows the verification passing, or the worker claims
+  done, verify the Expect criteria yourself with your tools. Re-run any
+  verification command — live output is ground truth, files on disk are not.
+  The worker's env is already active. Do NOT rebuild anything.
+  Call `verdict` with passed=true/false based on YOUR observations.
 
-CASE 1 — Worker called `done`  (your primary duty: independent verification)
+PATH B — GUIDE (worker failed or ran out of iterations)
+  Produce specific guidance for the next worker via `decision`.
+  Focus on ONE bug at a time. If the worker is stuck on multiple issues,
+  pick the most blocking one. The next retry handles the next issue.
+  - dos: every actionable conclusion from your analysis must appear here.
+    If you identified a fix, dos must state it concretely.
+  - donts: approaches already tried that failed, plus any violations of
+    task constraints (fabrication, modifying forbidden files, etc.)
+  - hint: key technical insight (quote values, name patterns)
 
-  You MUST independently verify every item in the Expect section before
-  approving. For each criterion:
+Read the transcript first, then choose Path A or B."""
 
-  1. Read the Expect criterion and identify what real-world state or output
-     it requires.
-  2. Use your tools to OBSERVE that state DIRECTLY. Do not trust worker-
-     produced artifacts at face value.
-  3. If the criterion references a verification script, test suite, build
-     command, or ANY command that PRODUCES the expected evidence, YOU MUST
-     RE-RUN that command yourself and compare its ACTUAL output against the
-     criterion. Examples:
-       - "<log-file> contains <success-string>" → re-run the command that
-         should produce the log; check its LIVE output, not the file.
-       - "tests pass" → run the test runner yourself.
-       - "binary X exists and prints Y" → run the binary yourself.
-     The file on disk is NOT evidence. The live command output IS evidence.
-  4. Cross-check for fabrication signals:
-       - Does the log's format / header / structure actually match what the
-         tool produces? A suspiciously terse success line (e.g. a lone
-         "PASSED" or "OK" with no test counts, timings, summary, or framing
-         the real tool would emit) is a fabrication red flag.
-       - Compare file mtime to the history of bash calls. If the log was
-         written by `write_file` rather than by running the verifier, it is
-         fabricated.
-       - If you re-run the verification and the output differs from the file,
-         the file is stale or fake — REJECT.
-  5. WARMUP — read worker's "## Verification Reference" block.
-     The worker's done summary may include a `## Verification Reference`
-     block naming the env, verification commands, evidence locations, and
-     random seeds used. Treat this as a WARMUP MAP, not as authority:
-       - Use it to jump straight to the verify step (skip env rediscovery).
-       - Then independently run at least one cited command yourself AND
-         cross-check the artifacts; trust only what YOU observe.
-       - If no Verification Reference is present, scan the worker's recent
-         bash tool_results (exit code 0) for the same cues.
-
-  6. ENV-REUSE POLICY — do NOT rebuild the environment.
-     When the worker claims done, the env is in a good state by definition.
-     Whatever env the worker activated (via `activate_env`) is already
-     active for your bash calls — every result starts with `[active env:
-     <path>]` so you can confirm. Manifest aliases (e.g. $CXX) and PATH
-     are injected, so just run bare commands.
-       - common_env (shared /mnt/sci_envs/<prefix>): READ-ONLY. Never
-         rebuild, never pip/mamba install anything there.
-       - local_env (./mamba_env) or temp_env (/tmp/mamba_env): legacy
-         env.sh tasks — bash auto-sources env.sh if `.active_env.json`
-         is absent. Do not recreate.
-       - If `[no active env]` shows up but the task needed one, surface
-         that as a failure — don't invent or activate a new one.
-     "Module not found" while `[active env: ...]` is shown is a real
-     failure (missing package in the env), not a wrapper bypass.
-
-  7. RANDOMIZATION — vary inputs to catch over-fitting/fabrication.
-     If the verification uses a random seed, a fixed sample, or a specific
-     test fixture, VARY it when you re-run:
-       - Re-run with a different seed.
-       - Feed a different sample / edge case / alternate fixture.
-       - Perturb inputs in a way the worker couldn't have anticipated.
-     A correct solution generalizes across varied inputs; a solution that
-     was pattern-matched to the reference case will diverge. If the task
-     is deterministic with no randomness, cross-check artifacts against
-     domain invariants instead (expected value ranges, file structure,
-     counts, known-good relationships between fields).
-
-  Call `verdict`:
-    - passed=true  ONLY if YOUR OWN observations independently confirm EVERY
-      Expect criterion. If you could not independently verify a criterion,
-      passed=false.
-    - passed=false otherwise. In `observations`, include the ACTUAL output
-      you saw from your own tool calls — quote the real output alongside the
-      worker's claim. In `reason`, state specifically what the worker should
-      fix, including the concrete evidence of the failure.
-
-  When rejecting, BE SPECIFIC AND DIAGNOSTIC. Restating the failure ("most
-  tests fail", "mismatch") is useless — the next worker will just rewrite and
-  hit the same class of bug. Look AT the failure output and try to name the
-  pattern. Common categories (task-agnostic):
-
-    - SYSTEMATIC DEVIATION: observed values differ from expected by a
-      near-constant amount, ratio, or scale across all items.
-      (suggests a wrong factor / normalization / direction / precision in
-       one computation, not per-item bugs)
-    - POSITIONAL error: some items wrong, others correct, with structure.
-      (e.g. every other item wrong → stride/step off-by-one;
-       first N wrong then correct → warmup / pipeline not flushed;
-       last N missing → early termination / wrong loop bound)
-    - INDEX/TIME SHIFT: observed sequence i matches expected i+k.
-      (output lags or leads by k — wrong trigger condition, off-by-k
-       in an index, wrong causality)
-    - BUILD / RUNTIME error: compile fails, exit nonzero, import error,
-      missing file. Quote the exact line the tool emitted.
-    - GARBAGE output: no discernible relationship to expected.
-      (suggests fundamental wrong-algorithm / wrong-wiring, not a subtle
-       tweak; next attempt should re-read the spec before rewriting)
-
-  In `reason` / `memory_update`, NAME the pattern you see and suggest the
-  CLASS of fix, not just what's wrong. Example shape (adapt to your task):
-  "observed values are uniformly ~30% below expected — looks like a
-  constant-factor bug in the producing step; check the scaling/direction in
-  <component>." Quote 2-3 concrete values (first two + a later one) so the
-  next worker can sanity-check their own fix.
-
-  If you cannot diagnose from the output alone, say so explicitly — e.g.
-  "outputs look unrelated to inputs; could not identify a pattern;
-  recommend re-reading the interface spec / reference data before
-  rewriting."
-
-CASE 2 — Worker hit MAX_ITERATIONS_WORK  (forward-looking guidance)
-
-  The worker ran out of iterations without calling done. Your job is to route
-  the task toward success on the next attempt.
-
-  SAMPLING COLLAPSE: if the worker produced little/no productive tool use
-  (many NUDGE events, malformed tool calls, prose-only turns, or off-task
-  content), this is a sampling pathology, not a task issue. Pick RETRY,
-  set exclude_model=true, and put "(skip diagnosis — sampling collapse)" in
-  memory_update. Don't synthesize fixes for nonsense output.
-
-  Decide:
-    - DELAY:   task depends on unfinished sibling work. Suggest wait time.
-    - RETRY:   task can succeed with specific guidance. Provide concrete
-               `memory_update` hints (see below). This is usually the right
-               call when the worker was making progress but ran out of time
-               or took a wrong sub-approach.
-    - REFLECT: task is fundamentally stuck (wrong definition, too large,
-               missing tools). Trigger deeper diagnosis.
-
-  If RETRY, your `memory_update` is the most important thing you will write.
-  It will be injected into the NEXT worker's context. Write concrete,
-  actionable hints — not vague encouragement. Good hints name files, lines,
-  commands, and pitfalls. Bad hints say "be more careful".
-
-  CRITICAL: Before writing the memory_update, READ the current state of any
-  files the worker modified. The next worker starts fresh with no memory.
-  Use this format:
-    KEEP: <what is correct in the current files — be specific, name values>
-    FIX:  <what is still wrong and how — name the PATTERN when possible>
-    RUN:  <exact command to verify>
-  Without KEEP, the next worker will rewrite from scratch and lose progress.
-
-  Pattern-naming applies here too (see CASE 1 "BE SPECIFIC AND DIAGNOSTIC"):
-  if the last verify showed a systematic offset, time-shift, or every-Nth
-  error, NAME that pattern in FIX so the next worker doesn't repeat the
-  same guess. Quote 2-3 concrete sample values if available.
-
-  Model control (pick ONE):
-    - Same model, just retry with better guidance: omit model fields.
-    - Try another at same rank: set exclude_model=true (model did poorly).
-    - Escalate rank: set suggested_rank=N (model too weak).
-
-  If you detected fabrication in a prior done-case rejection that cascaded
-  here, bias toward exclude_model=true or suggested_rank escalation — the
-  worker cannot be trusted on this task.
-
-  Thinking mode (thinkable=true models only): enable ONLY for reasoning
-  failures. Start with thinking_budget=5000.
-
-GLOBAL PRINCIPLES
-- Ranking principle: fast iteration wins. Prefer same rank + better hints
-  over escalation, unless the worker clearly lacks capability.
-- Be strict. Never approve because "probably it's fine" — require observed
-  evidence.
-- You have read-only tools: bash, read_file, memory_read, compact.
-- The same task_dir and environment from the worker persist during review —
-  you do NOT need to re-install or re-bind anything."""
+REVIEW_SYSTEM = REVIEW_SYSTEM_UNIFIED
 
 REVIEW_SYSTEM_SIMPLE = """\
 You are a quick verification agent. Check if the task's Expect criteria are met.
@@ -1044,10 +968,15 @@ TOOLS = [
             "always see which shared env is active. PATH/LD_LIBRARY_PATH and "
             "any manifest aliases (e.g. CXX) are pre-injected by the runtime — "
             "use bare commands (python3, verilator, make), no env.sh needed. "
-            "Set timeout for long-running commands (default 30s, max from config).",
+            "Set timeout for long-running commands (default 30s, max from config). "
+            "Output is truncated by default (head+tail lines). Set full_output=true "
+            "to get up to 3x more output — COSTLY, eats context budget. Only use "
+            "when you genuinely need the complete output (e.g. full build log to "
+            "find a specific error). For most commands, default truncation is enough.",
         "parameters": {"type": "object", "properties": {
             "command": {"type": "string"},
-            "timeout": {"type": "integer", "description": "Seconds to wait (default 30)"}},
+            "timeout": {"type": "integer", "description": "Seconds to wait (default 30)"},
+            "full_output": {"type": "boolean", "description": "Get full output (3x context cost). Default false."}},
             "required": ["command"]}}},
     {"type": "function", "function": {"name": "list_shared_envs",
         "description": "List shared envs available under /mnt/sci_envs/. "
@@ -1082,13 +1011,16 @@ TOOLS = [
             "limit": {"type": "integer", "description": "Max chars to return (default 10000)"}},
             "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file",
-        "description": "Write content to a file (full overwrite). Prefer edit_file for modifying existing files — it preserves what you already fixed.",
+        "description": "Write COMPLETE content to a file (full overwrite). You must write "
+                       "the ENTIRE file — never use '...' or placeholders. For modifying "
+                       "existing files, use edit_file instead.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"}, "content": {"type": "string"}},
             "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "edit_file",
-        "description": "Replace a string in a file. Faster than write_file for small changes. "
-                       "old_string must match exactly once in the file.",
+        "description": "Replace a string in a file. Preferred for modifying existing files "
+                       "— preserves what you already fixed. old_string must match exactly "
+                       "once in the file.",
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string"},
             "old_string": {"type": "string", "description": "Exact string to find (must be unique in file)"},
@@ -1167,7 +1099,11 @@ REVIEW_TOOLS = [
             "exclude_model": {"type": "boolean", "description": "True = current model did poorly, try another at same rank."},
             "enable_thinking": {"type": "boolean", "description": "Enable thinking mode if model supports it."},
             "thinking_budget": {"type": "integer", "description": "Thinking token budget (e.g. 5000, 10000). Only if enable_thinking=true."},
-            "reason": {"type": "string"}},
+            "reason": {"type": "string"},
+            "dos": {"type": "string", "description": "Specific actions the next worker SHOULD do."},
+            "donts": {"type": "string", "description": "Approaches already tried that failed — next worker should AVOID these."},
+            "hint": {"type": "string", "description": "Key technical insight extracted from the verification output."},
+            "worker_on_track": {"type": "boolean", "description": "True if worker was heading right direction but ran out of iterations."}},
             "required": ["action", "reason"]}}},
 ]
 
@@ -1216,14 +1152,18 @@ _history_lock = threading.Lock()
 
 
 def _history(task_dir, entry_type, depth, **kwargs):
-    """Append to task .history.md. Append-only tape."""
+    """Append to task .history.md and emit to cam.
+
+    Cam gets full untruncated data. .history.md truncates for readability."""
     _cam(entry_type, depth=depth, task_dir=task_dir, **kwargs)
     ts = time.strftime('%H:%M:%S')
     indent = "  " * depth
     hf = os.path.join(task_dir, ".history.md")
     lines = [f"{indent}**[{ts}] {entry_type}**"]
     for k, v in kwargs.items():
-        val = str(v)[:500]
+        val = str(v)
+        if len(val) > 500:
+            val = val[:300] + f"\n  ...[{len(val)-500} chars omitted]...\n" + val[-200:]
         lines.append(f"{indent}  - {k}: {val}")
     lines.append("")
     entry = "\n".join(lines) + "\n"
@@ -1233,7 +1173,7 @@ def _history(task_dir, entry_type, depth, **kwargs):
 
 
 def _global_history(entry_type, **kwargs):
-    """Append to .global_history.md. System-level tape."""
+    """Append to .global_history.md and emit to cam."""
     _cam(entry_type, **kwargs)
     ts = time.strftime('%Y-%m-%d %H:%M:%S')
     hf = os.path.join(DRIVER_DIR, "run", ".global_history.md")
@@ -1330,6 +1270,65 @@ def _clear_feedback(task_dir, task_file):
             os.remove(fp)
         except OSError:
             pass
+
+
+def _format_worker_transcript(messages, cap=30000):
+    """Convert worker messages to a readable briefing for the review agent.
+    Shows tool calls with full results (especially verify output) but
+    truncates write_file content to filename + first/last 5 lines."""
+    parts = []
+    total = 0
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "")
+        if role == "system":
+            continue
+        if role == "user":
+            content = m.get("content", "")
+            if "Recap" in content:
+                line = content.split("\n")[0]
+                parts.append(f"--- {line} ---")
+            continue
+        if role == "assistant":
+            tcs = m.get("tool_calls", [])
+            for tc in tcs:
+                fn = tc.get("function", {})
+                name = fn.get("name", "?")
+                args_str = fn.get("arguments", "")
+                if name == "write_file":
+                    try:
+                        args = json.loads(args_str)
+                        path = args.get("path", args.get("content", "")[:60])
+                        content = args.get("content", "")
+                        lines = content.split("\n")
+                        if len(lines) > 10:
+                            preview = "\n".join(lines[:5] + ["  ..."] + lines[-5:])
+                        else:
+                            preview = content
+                        parts.append(f"[write_file] {path}\n{preview}")
+                    except Exception:
+                        parts.append(f"[write_file] {args_str[:200]}")
+                elif name == "done":
+                    try:
+                        args = json.loads(args_str)
+                        parts.append(f"[done] {args.get('summary', args_str)[:500]}")
+                    except Exception:
+                        parts.append(f"[done] {args_str[:500]}")
+                else:
+                    parts.append(f"[{name}] {args_str[:300]}")
+            continue
+        if role == "tool":
+            content = m.get("content", "")
+            parts.append(f"  → {content}")
+            continue
+        entry = "\n".join(parts)
+        if len(entry) > cap:
+            break
+    result = "\n".join(parts)
+    if len(result) > cap:
+        result = result[:cap] + "\n...[transcript truncated]"
+    return result
 
 
 def _format_prior_investigation(messages, max_pairs=12, result_cap=500):
@@ -1436,8 +1435,29 @@ def _response_meta(result):
     return meta
 
 
+def _msg_to_dict(msg):
+    """Convert a ChatCompletionMessage SDK object to a plain dict.
+    Ensures messages array contains only JSON-serializable dicts so cam
+    records the exact payload that LiteLLM sends on the wire."""
+    if isinstance(msg, dict):
+        return msg
+    d = {"role": getattr(msg, "role", "assistant")}
+    content = getattr(msg, "content", None)
+    if content is not None:
+        d["content"] = content
+    if getattr(msg, "tool_calls", None):
+        d["tool_calls"] = [
+            {"id": tc.id, "type": "function",
+             "function": {"name": tc.function.name,
+                          "arguments": tc.function.arguments}}
+            for tc in msg.tool_calls
+        ]
+    return d
+
+
 def _api_call(client, model, messages, tools, retries=3,
               thinking=False, thinking_budget=0):
+    _t0_api = time.time()
     mc = pam.config(model)
     model_max_tokens = mc.get("max_tokens", 4096)
     kwargs = {"model": model, "messages": messages, "tools": tools}
@@ -1465,13 +1485,14 @@ def _api_call(client, model, messages, tools, retries=3,
             pam.report_connection_ok()
             msg = result.choices[0].message
             _cam("api_request", model=model, messages=messages,
-                 tools=[t.get("function", {}).get("name") for t in (tools or [])],
+                 tools=tools,
                  thinking=thinking, thinking_budget=thinking_budget,
                  response_content=getattr(msg, 'content', None),
                  response_tool_calls=[
                      {"name": tc.function.name, "args": tc.function.arguments}
                      for tc in (msg.tool_calls or [])] if msg.tool_calls else [],
                  **_response_meta(result))
+            result._llm_elapsed = time.time() - _t0_api
             return result
         except Exception as e:
             err = str(e)
@@ -1484,11 +1505,11 @@ def _api_call(client, model, messages, tools, retries=3,
                 raise
 
 
-def _checkpoint_msg(task_content, memory, iteration, max_iter, wall_used=None, wall_limit=None):
+def _recap_msg(task_content, memory, iteration, max_iter, wall_used=None, wall_limit=None):
     budget = f"iteration {iteration}/{max_iter}"
     if wall_limit:
         budget += f", LLM time {wall_used:.0f}s/{wall_limit}s"
-    parts = [f"[Checkpoint: {budget}]",
+    parts = [f"[Recap: {budget}]",
         "Re-read your SAM and verify progress.",
         "---", "SAM (re-stated):", task_content[:CAP_TASK]]
     if memory:
@@ -1511,20 +1532,86 @@ def _checkpoint_msg(task_content, memory, iteration, max_iter, wall_used=None, w
 # ============================================================
 
 def _truncate(content, limit=None):
-    """Truncate keeping head + last few lines so agents see errors and final result."""
+    """Line-based head+tail truncation (Codex-style). Falls back to char-based
+    middle-cut when individual lines are extremely long."""
     if limit is None:
         limit = TOOL_RESULT_CAP
     if len(content) <= limit:
         return content
-    # Keep as much head as possible, append last 5 lines for final status.
-    lines = content.rstrip('\n').split('\n')
-    tail_lines = '\n'.join(lines[-5:])
-    head = limit - len(tail_lines) - 80  # 80 for the separator
-    if head < limit // 2:
-        head = limit // 2
-    return (content[:head]
-            + f"\n\n...[{len(content) - head - len(tail_lines)} chars truncated, last 5 lines shown]...\n\n"
-            + tail_lines)
+    HEAD_LINES, TAIL_LINES = 50, 50
+    lines = content.split('\n')
+    if len(lines) > HEAD_LINES + TAIL_LINES:
+        head = '\n'.join(lines[:HEAD_LINES])
+        tail = '\n'.join(lines[-TAIL_LINES:])
+        omitted = len(lines) - HEAD_LINES - TAIL_LINES
+        result = f"{head}\n\n...[{omitted} lines omitted]...\n\n{tail}"
+        if len(result) <= limit:
+            return result
+        content = result
+    half = limit // 2
+    cut = len(content) - limit
+    return f"{content[:half]}\n\n...[{cut} chars omitted]...\n\n{content[-half:]}"
+
+
+def _compact_tool_result(content, cap=1500):
+    """Tiered hard compaction for old tool results.
+    Tiny (<500): keep verbatim. Medium (500-2K): light trim head 5 + tail 10.
+    Large (>2K): tight trim head 5 + tail 15 — tail-heavy because verdicts,
+    errors, and final status cluster near the end (validated on fw_complete1:
+    FAILED at line -12 of 44 survived with tail=15, lost with tail=5)."""
+    if len(content) <= 500:
+        return content
+    lines = content.split('\n')
+    if len(content) <= 2000:
+        if len(lines) <= 17:
+            return content
+        head = '\n'.join(lines[:5])
+        tail = '\n'.join(lines[-10:])
+        return f"{head}\n...[{len(lines) - 15} lines]...\n{tail}"
+    if len(lines) <= 22:
+        return content[:cap] + "..."
+    head = '\n'.join(lines[:5])
+    tail = '\n'.join(lines[-15:])
+    result = f"{head}\n...[{len(lines) - 20} lines compacted]...\n{tail}"
+    if len(result) > cap:
+        result = result[:cap] + "..."
+    return result
+
+
+def _compact_old_results(messages, keep_recent=6):
+    """Compact tool results older than keep_recent messages from tail.
+    Adds context (tool name + args) so the compacted result tells a story.
+    The agent's assistant response that followed stays intact as implicit summary."""
+    if len(messages) <= keep_recent + 2:
+        return
+    cutoff = len(messages) - keep_recent
+    # Build tool_call_id → (name, args_summary) map from assistant messages
+    tc_map = {}
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls", []):
+                fn = tc.get("function", {})
+                name = fn.get("name", "?")
+                args_raw = fn.get("arguments", "")
+                try:
+                    args = json.loads(args_raw)
+                    if name == "bash":
+                        summary = args.get("command", "")[:80]
+                    elif name == "write_file":
+                        summary = args.get("path", "")
+                    else:
+                        summary = args_raw[:80]
+                except Exception:
+                    summary = args_raw[:80]
+                tc_map[tc.get("id", "")] = (name, summary)
+    for i in range(2, cutoff):
+        msg = messages[i]
+        if msg.get("role") == "tool" and len(msg.get("content", "")) > 500:
+            tc_id = msg.get("tool_call_id", "")
+            name, args_summary = tc_map.get(tc_id, ("?", ""))
+            header = f"[{name}] {args_summary}\n"
+            body = _compact_tool_result(msg["content"], cap=500 - len(header))
+            messages[i] = {**msg, "content": header + body}
 
 
 def _read_file_impl(args, task_dir):
@@ -1561,7 +1648,7 @@ def _compact_text(text, instruction=""):
             _usage[model] = _usage.get(model, 0) + 1
         result = resp.choices[0].message.content.strip()
         _cam("api_request", caller="compact", model=model,
-             response=result[:300], **_response_meta(resp))
+             response=result, **_response_meta(resp))
         return result
     except Exception:
         return text  # fallback: return original
@@ -1800,7 +1887,8 @@ def _execute_tool(name, args, task_dir, node, scheduler):
                 shell=True, capture_output=True, env=env,
                 text=True, timeout=timeout, cwd=task_dir)
             out = (r.stdout + r.stderr).strip()
-            body = _truncate(out) if out else "(no output)"
+            cap = TOOL_RESULT_CAP_FULL if args.get("full_output") else TOOL_RESULT_CAP
+            body = _truncate(out, cap) if out else "(no output)"
             return _active_env_header(active) + body
         elif name == "list_shared_envs":
             return _list_shared_envs()
@@ -1930,6 +2018,7 @@ def _run_agent_loop(system, tools, execute_fn, task_dir, user_msg,
         {"role": "system", "content": system},
         {"role": "user", "content": user_msg},
     ]
+    consecutive_empty = 0
     for i in range(max_iter):
         if _WALL_EXCEEDED.is_set():
             _history(task_dir, f"{label}_TOTAL_WALL_LIMIT", depth, iter=i)
@@ -1952,10 +2041,14 @@ def _run_agent_loop(system, tools, execute_fn, task_dir, user_msg,
                 messages.append({"role": "user",
                     "content": f"Malformed tool call. Use only: {', '.join(valid_names)}"})
                 continue
-        messages.append(msg)
+        messages.append(_msg_to_dict(msg))
         if not msg.tool_calls:
+            consecutive_empty = consecutive_empty + 1 if not (msg.content or "").strip() else 0
+            if consecutive_empty >= 2:
+                break  # thinking model stuck — exit loop, trigger force-commit
+            terminal_names = terminal_tool if isinstance(terminal_tool, (list, tuple, set)) else [terminal_tool]
             messages.append({"role": "user", "content":
-                f"You must call {terminal_tool} or use a tool."})
+                f"You must call {' or '.join(terminal_names)} or use a tool."})
             continue
         for tc in msg.tool_calls:
             try:
@@ -1964,8 +2057,10 @@ def _run_agent_loop(system, tools, execute_fn, task_dir, user_msg,
                 messages.append({"role": "tool", "tool_call_id": tc.id,
                     "content": "ERROR: malformed JSON."})
                 continue
-            if tc.function.name == terminal_tool:
-                return args
+            if tc.function.name == terminal_tool or (
+                    isinstance(terminal_tool, (list, tuple, set))
+                    and tc.function.name in terminal_tool):
+                return {**args, "_terminal": tc.function.name}
             result = execute_fn(tc.function.name, args, task_dir)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                 "content": str(result)})
@@ -1980,23 +2075,25 @@ def _run_agent_loop(system, tools, execute_fn, task_dir, user_msg,
             capture_messages.extend(messages)
         return None
     try:
+        terminal_names = terminal_tool if isinstance(terminal_tool, (list, tuple, set)) else [terminal_tool]
         terminal_only = [t for t in tools
-                         if t.get("function", {}).get("name") == terminal_tool]
+                         if t.get("function", {}).get("name") in terminal_names]
         if terminal_only:
+            tool_list = " or ".join(f"`{n}`" for n in terminal_names)
             messages_fc = list(messages) + [{"role": "user", "content":
                 f"You have reached the iteration budget. Based on everything "
-                f"you have observed so far, commit your verdict NOW by calling "
-                f"`{terminal_tool}`. No other tools are permitted. If you are "
-                f"not fully certain, call {terminal_tool} with your best "
-                f"current judgment and state your uncertainty in the reason."}]
+                f"you have observed so far, commit NOW by calling "
+                f"{tool_list}. No other tools are permitted. If you are "
+                f"not fully certain, state your uncertainty in the reason."}]
             _history(task_dir, f"{label}_FORCE_COMMIT", depth)
             response = _api_call(client, model, messages_fc, terminal_only)
             fc_msg = response.choices[0].message
             if fc_msg.tool_calls:
                 for tc in fc_msg.tool_calls:
-                    if tc.function.name == terminal_tool:
+                    if tc.function.name in terminal_names:
                         try:
                             args = json.loads(tc.function.arguments)
+                            args["_terminal"] = tc.function.name
                             _history(task_dir, f"{label}_FORCE_COMMIT_OK",
                                      depth, result=str(args)[:200])
                             return args
@@ -2093,7 +2190,7 @@ def _review_fallback(task_dir, case, user_msg, terminal, depth, force_model=None
         json_match = re.search(r'\{.*\}', raw, re.DOTALL)
         if json_match:
             args = json.loads(json_match.group())
-            _history(task_dir, "REVIEW_FALLBACK_OK", depth, result=str(args)[:300])
+            _history(task_dir, "REVIEW_FALLBACK_OK", depth, result=str(args))
             return args
     except Exception as e:
         _history(task_dir, "REVIEW_FALLBACK_ERROR", depth, error=str(e)[:200])
@@ -2148,45 +2245,31 @@ def review_sam(task_dir, node, scheduler, case, expect_section="",
           f"(paused {len(paused)} siblings)...", flush=True)
 
     try:
+        transcript = _format_worker_transcript(
+            getattr(node, '_worker_messages', []))
+        prior_feedback = _read_feedback(task_dir, node.task_file)
+        prior_section = ""
+        if prior_feedback:
+            prior_section = (
+                f"\n== PRIOR REVIEW CONCLUSIONS ==\n"
+                f"{prior_feedback[:10000]}\n\n")
+        expect_info = ""
+        if expect_section:
+            expect_info = f"\n== EXPECTATIONS ==\n{expect_section}\n\n"
+        done_info = ""
         if case == "done":
-            user_msg = (
-                f"Worker claims done.\nSummary: {summary}\n\n---\n"
-                f"EXPECTATIONS TO VERIFY:\n{expect_section}\n\n---\n"
-                f"Check each by inspecting actual state. Call `verdict`.")
-            terminal = "verdict"
+            done_info = f"Worker claims done.\nSummary: {summary}\n\n"
         else:
-            mem = _read_memory(task_dir)
-            # Read tail of history for context
-            hf_path = os.path.join(task_dir, ".history.md")
-            history_tail = ""
-            if os.path.exists(hf_path):
-                with open(hf_path) as f:
-                    lines = f.readlines()
-                    history_tail = "".join(lines[-80:])
-            thinkable = pam.is_thinkable(node.model)
-            thinking_status = (f"thinking={'ON' if node.thinking else 'OFF'}"
-                f" (budget={node.thinking_budget})" if thinkable
-                else "thinking=not supported by this model")
-            bash_note = ""
-            if getattr(node, 'bash_time', 0) == -1:
-                bash_note = ("\n[BASH-TIME UNLIMITED] This task has BashTime: -1. "
-                    "The bash tool defaults to timeout=30s which kills long operations. "
-                    "Workers should use timeout=86400 for any workload command. "
-                    "Check whether the worker hit 30s timeouts and suggest using "
-                    "large timeouts in your feedback.\n")
-            user_msg = (
-                f"Worker hit MAX_ITERATIONS_WORK.\n\n"
-                f"Task: {node.task_file}\n"
-                f"Current rank: {node.rank}, model: {node.model}\n"
-                f"{thinking_status}{bash_note}\n"
-                f"Memory:\n{mem[:2000]}\n\n"
-                f"Recent history:\n{history_tail[:3000]}\n\n"
-                f"Decide: delay, retry, or reflect.\n"
-                f"If retrying: set exclude_model=true if model did poorly "
-                f"but task rank is correct. Set suggested_rank if task needs "
-                f"stronger model. Set enable_thinking + thinking_budget for "
-                f"complex reasoning. Call `decision`.")
-            terminal = "decision"
+            done_info = "Worker exhausted iterations.\n\n"
+        user_msg = (
+            f"{done_info}"
+            f"{prior_section}"
+            f"== WORKER TRANSCRIPT ==\n{transcript}\n\n"
+            f"{expect_info}"
+            f"If the transcript shows verification passing, verify the Expect "
+            f"criteria yourself and call `verdict`.\n"
+            f"Otherwise, produce guidance for the next worker and call `decision`.")
+        terminal = ("verdict", "decision")
 
         # If control model is a no-tool model (rank < 0), skip tool-based review
         # and go straight to text-only fallback
@@ -2195,11 +2278,7 @@ def review_sam(task_dir, node, scheduler, case, expect_section="",
             args = _review_fallback(task_dir, case, user_msg, terminal, depth,
                                     force_model=model)
         else:
-            review_prompt = REVIEW_SYSTEM_SIMPLE if node.rank <= 0 else REVIEW_SYSTEM
-            # Iter cap by case (each independent — no global flooring):
-            #   done   → standalone verification, may run build/test → wider budget
-            #   failed → diagnose root cause + decide delay/retry/reflect from
-            #            .history tail + .memory + task spec → tight budget
+            review_prompt = REVIEW_SYSTEM_SIMPLE if node.rank <= 0 else REVIEW_SYSTEM_UNIFIED
             iter_cap = (MAX_ITERATIONS_REVIEW_DONE if case == "done"
                         else MAX_ITERATIONS_REVIEW_FAIL)
             # Capture primary's message history so a lateral reviewer (Fix D)
@@ -2249,7 +2328,8 @@ def review_sam(task_dir, node, scheduler, case, expect_section="",
                 return {"verdict": False, "feedback": "Review timed out"}
             return {"action": "reflect", "reason": "Review timed out"}
 
-        if case == "done":
+        which = args.pop("_terminal", None)
+        if which == "verdict" or (which is None and case == "done"):
             passed = args.get("passed", False)
             observations = args.get("observations", "")
             reason = args.get("reason", "")
@@ -2345,17 +2425,14 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
     if plan.get("no_memory"):
         global_memory = ""
 
-    # Per-task LLM wall limit: ThinkTime > Timeout > parent ThinkTime > rank default.
-    # ThinkTime: -1 = no LLM time limit.
+    # Per-task LLM wall limit (ThinkTime). Caps total LLM response time per SAM,
+    # excludes bash/tool time. -1 = no limit. Inherits from parent if not set.
     think_time = plan.get("think_time")
     if think_time is None:
         think_time = getattr(node.parent, 'think_time', None) if node.parent else None
     node.think_time = think_time
-    if wall_limit is None:
-        if think_time is not None:
-            wall_limit = None if think_time == -1 else think_time
-        else:
-            wall_limit = plan.get("wall_limit") or None
+    if wall_limit is None and think_time is not None:
+        wall_limit = None if think_time == -1 else think_time
 
     # Per-task bash time: -1 = no limit, else cap
     node.bash_time = plan.get("bash_time", MAX_BASH_TIME)
@@ -2444,29 +2521,18 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         user_msg += (f"\n\n---\nTaskGroup Experience ({task_group}) — "
                      f"cross-task domain memory:\n{taskgroup_memory[:CAP_TASKGROUP]}")
 
-    # Review feedback from prior attempts on this same subtask (if any).
-    # Always injected, independent of NoMemory (this is run-scoped, not
-    # cross-task). The review agent writes specific, actionable hints here
-    # when rejecting a done claim or routing a failed-loop retry.
-    # Appended at the bottom (after task + memory + taskgroup). Prepending
-    # at the top was tested (X3/X4 ablation) and regressed pass rate.
+    # Review feedback from prior attempts. Appended at bottom — the worker
+    # reads the task spec first, then sees what prior attempts tried.
     feedback = _read_feedback(task_dir, task_file)
     if feedback:
         user_msg += (
-            f"\n\n---\n[REVIEW FEEDBACK FROM PRIOR ATTEMPTS ON THIS SUBTASK]\n"
-            f"The independent reviewer rejected or routed previous attempts with "
-            f"the following concrete observations and hints. Read them carefully "
-            f"and act on them — do not repeat the same mistakes.\n\n"
+            f"\n\n---\n[REVIEW FEEDBACK FROM PRIOR ATTEMPTS]\n"
+            f"Read carefully — do not repeat the same mistakes.\n\n"
             f"{feedback[:CAP_MEMORY]}")
 
-    # Iteration cap is global (rank no longer scales it); per-rank total wall stays.
-    # Iter cap: dynamic (prescan-suggested, clamped to [5, MAX_ITERATIONS_WORK]) when
-    # DYNAMIC_MAX_ITER=1 and plan supplied a value; otherwise fixed at MAX_ITERATIONS_WORK.
-    suggested = plan.get("suggested_max_iter")
-    if DYNAMIC_MAX_ITER and isinstance(suggested, (int, float)) and suggested > 0:
-        max_iter = max(5, min(int(suggested), MAX_ITERATIONS_WORK))
-    else:
-        max_iter = MAX_ITERATIONS_WORK
+    # Detect whether the worker model is a thinking model (affects iter cap + prompt).
+    worker_is_thinking = node.thinking or pam.is_thinkable(model)
+    max_iter = MAX_ITERATIONS_WORK_THINK if worker_is_thinking else MAX_ITERATIONS_WORK
     # Total wall (incl. bash) is always enforced — it's the hard safety cap
     # against runaway tasks. BashTime: -1 only relaxes the per-bash-call cap,
     # NOT this clock-time bound. Use TOTAL_WALL_PER_RANK (or per-task overrides)
@@ -2533,16 +2599,17 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
     node.state = "running"
     _history(task_dir, "SAM_START", depth,
         task_file=task_file, model=model, rank=plan["rank"],
-        thinking=node.thinking, thinking_budget=node.thinking_budget,
+        thinking=worker_is_thinking, thinking_budget=node.thinking_budget,
         wall_limit=wall_limit or "none", total_wall=total_wall or "none",
         max_iter=max_iter, has_expect=bool(expect_section))
+    _mode = "think" if worker_is_thinking else "nonthink"
     print(f"{prefix}[start] {task_file} rank={plan['rank']} model={model} "
-          f"max_iter={max_iter} total_wall={total_wall}s",
+          f"mode={_mode} max_iter={max_iter} total_wall={total_wall}s",
           flush=True)
 
     client = OpenAI(base_url=f"{GATEWAY}/v1", api_key="na")
     has_subtasks = bool(plan.get("subtasks"))
-    system_prompt = _build_system_prompt(_meta, has_subtasks)
+    system_prompt = _build_system_prompt(_meta, has_subtasks, thinking=worker_is_thinking)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
@@ -2559,6 +2626,8 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         node._task_wall_start = wall_start
     _ensure_wall_watchdog(node._task_wall_start, total_wall)
     excluded_time = 0.0  # subagent + tool time (excluded from wall limit)
+    node.llm_times = getattr(node, 'llm_times', [])
+    node.tool_time_total = getattr(node, 'tool_time_total', 0.0)
     READONLY_TOOLS = {"read_file", "memory_read", "compact"}
 
     effective_iter = 0  # only counts iterations with mutating tool calls
@@ -2595,22 +2664,24 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             total_iter=total_iter,
             avg_iter_s=f"{(time.time()-wall_start)/total_iter:.1f}" if total_iter > 1 else "n/a")
 
-        # Checkpoint (based on effective iterations)
-        if effective_iter > 0 and effective_iter % CHECKPOINT_EVERY == 0:
+        # Recap (based on effective iterations)
+        if effective_iter > 0 and effective_iter % RECAP_EVERY == 0:
             memory = _read_memory(task_dir)
             messages.append({"role": "user",
-                "content": _checkpoint_msg(task_content, memory, effective_iter+1, max_iter,
+                "content": _recap_msg(task_content, memory, effective_iter+1, max_iter,
                     wall_used=time.time()-wall_start-excluded_time,
                     wall_limit=wall_limit)})
-            _history(task_dir, "CHECKPOINT", depth)
-            print(f"{prefix}  [checkpoint]", flush=True)
+            _history(task_dir, "RECAP", depth)
+            print(f"{prefix}  [recap]", flush=True)
 
+        _compact_old_results(messages)
         messages = _trim_messages(messages)
 
         # API call
         try:
             response = _api_call(client, model, messages, task_tools,
                 thinking=node.thinking, thinking_budget=node.thinking_budget)
+            node.llm_times.append(getattr(response, '_llm_elapsed', 0))
             consecutive_errors = 0
         except Exception as e:
             consecutive_errors += 1
@@ -2656,7 +2727,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
                     break
                 continue
 
-        messages.append(msg)
+        messages.append(_msg_to_dict(msg))
 
         # Text-only — nudge (detect models that can't use tools)
         if not msg.tool_calls:
@@ -2709,12 +2780,16 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
                         "content": "skipped (done was called)"})
 
                 if expect_section:
+                    node._worker_messages = list(messages)
                     t0 = time.time()
                     rv = review_sam(task_dir, node, scheduler, "done",
                                    expect_section, summary, depth,
                                    control_model=control_model)
+                    if hasattr(node, '_worker_messages'):
+                        del node._worker_messages
                     excluded_time += time.time() - t0
-                    if rv["verdict"]:
+                    node.tool_time_total += time.time() - t0
+                    if rv.get("verdict"):
                         _history(task_dir, "SAM_VERIFIED", depth)
                         # Success: clear any stale review feedback for this
                         # subtask so a later re-run sees a clean slate.
@@ -2722,28 +2797,29 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
                         return summary
                     else:
                         review_failures += 1
+                        feedback = rv.get("feedback", rv.get("reason", ""))
                         _history(task_dir, "REVIEW_REJECTED", depth,
                             attempt=f"{review_failures}/{MAX_RETRIES_REJECTED}",
-                            feedback=rv["feedback"])
-                        print(f"{prefix}[rejected] {rv['feedback']}", flush=True)
+                            feedback=feedback)
+                        print(f"{prefix}[rejected] {feedback}", flush=True)
                         # Persist the reviewer's concrete observations so any
                         # future retry of this subtask (including after loop
                         # exhaustion and full _run_sam restart) sees them.
                         _append_feedback(task_dir, task_file,
                             f"DONE-CLAIM REJECTED (attempt {review_failures}/{MAX_RETRIES_REJECTED})\n"
                             f"Worker summary: {summary[:500]}\n"
-                            f"Reviewer findings:\n{rv['feedback']}")
+                            f"Reviewer findings:\n{feedback}")
                         if review_failures >= MAX_RETRIES_REJECTED:
                             _history(task_dir, "MAX_REVIEW_FAILURES", depth)
                             diag = reflect_sam(task_dir, task_file,
-                                f"Review failed {MAX_RETRIES_REJECTED}x. Last: {rv['feedback']}",
+                                f"Review failed {MAX_RETRIES_REJECTED}x. Last: {rv.get('feedback', rv.get('reason', ''))}",
                                 depth, control_model=control_model)
                             return (f"UNVERIFIED: {summary}\n"
                                 f"REFLECTION: [{diag['cause']}] {diag['suggestion']}")
                         messages.append({"role": "user",
                             "content": f"Review FAILED — your previous done claim was rejected "
                                 f"by the INDEPENDENT reviewer, who ran its own tools to check:\n\n"
-                                f"{rv['feedback']}\n\n"
+                                f"{rv.get('feedback', rv.get('reason', ''))}\n\n"
                                 f"Treat the reviewer's observations as ground truth. Do NOT "
                                 f"fabricate logs or claim success without actually running the "
                                 f"verification command yourself. Fix the real issue, re-run "
@@ -2757,12 +2833,13 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             elif tc.function.name == "subagent":
                 iter_has_mutation = True
                 _history(task_dir, "TOOL_CALL", depth, tool="subagent",
-                    args=json.dumps(args)[:300])
+                    args=json.dumps(args))
                 t0 = time.time()
                 result = _execute_tool("subagent", args, task_dir, node, scheduler)
                 excluded_time += time.time() - t0
+                node.tool_time_total += time.time() - t0
                 _history(task_dir, "TOOL_RESULT", depth, tool="subagent",
-                    result=str(result)[:300])
+                    result=str(result))
                 messages.append({"role": "tool", "tool_call_id": tc.id,
                     "content": str(result)})
 
@@ -2771,13 +2848,14 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
                 if tc.function.name not in READONLY_TOOLS:
                     iter_has_mutation = True
                 _history(task_dir, "TOOL_CALL", depth,
-                    tool=tc.function.name, args=json.dumps(args)[:300])
+                    tool=tc.function.name, args=json.dumps(args))
                 t0 = time.time()
                 result = _execute_tool(tc.function.name, args, task_dir,
                                       node, scheduler)
                 excluded_time += time.time() - t0
+                node.tool_time_total += time.time() - t0
                 _history(task_dir, "TOOL_RESULT", depth,
-                    tool=tc.function.name, result=str(result)[:300])
+                    tool=tc.function.name, result=str(result))
                 messages.append({"role": "tool", "tool_call_id": tc.id,
                     "content": str(result)})
 
@@ -2796,9 +2874,22 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
                 f"Memory: {memory[:300]}")
 
     # --- MAX_ITERATIONS_WORK or WALL_LIMIT: review decides recovery ---
+    # Review model: task ControlModel → REVIEW_MODEL env → pam.highest()
+    node._worker_messages = list(messages)
     _history(task_dir, "LOOP_EXHAUSTED", depth)
+    review_model = control_model or os.environ.get("REVIEW_MODEL") or None
     rv = review_sam(task_dir, node, scheduler, "failed", depth=depth,
-                    control_model=control_model)
+                    control_model=review_model)
+    if hasattr(node, '_worker_messages'):
+        del node._worker_messages
+
+    # If the review verified the worker actually passed (chose verdict instead
+    # of decision), credit it as a pass — no retry needed.
+    if "verdict" in rv and rv["verdict"]:
+        _history(task_dir, "SAM_VERIFIED_BY_FAIL_REVIEW", depth)
+        _clear_feedback(task_dir, task_file)
+        print(f"{prefix}[review] PASS (verified by failed-case review)", flush=True)
+        return rv.get("feedback", "PASS (verified after exhaustion)")
 
     # MAX_RETRIES_EXHAUSTED (env-tunable, default 3): cap on delay/retry rounds after
     # LOOP_EXHAUSTED to prevent infinite recursion. See module-level definition.
@@ -2823,12 +2914,28 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
                     f.write(f"\n\n---\nReview feedback:\n{rv['memory_update']}")
         # Also persist the hint as subtask-scoped review feedback so the
         # next _run_sam attempt injects it directly into the worker context.
-        hint_text = rv.get("memory_update") or rv.get("reason", "")
-        if hint_text:
-            _append_feedback(task_dir, task_file,
-                f"LOOP-EXHAUSTED RETRY (recovery {node._recovery_count}/{MAX_RETRIES_EXHAUSTED})\n"
-                f"Reviewer reason: {rv.get('reason', '')}\n"
-                f"Reviewer hints for next attempt:\n{hint_text}")
+        reason = rv.get('reason', '')
+        feedback_parts = [
+            f"LOOP-EXHAUSTED RETRY (recovery {node._recovery_count}/{MAX_RETRIES_EXHAUSTED})",
+            f"Reason: {reason}",
+        ]
+        if rv.get("dos"):
+            feedback_parts.append(f"DO: {rv['dos']}")
+        else:
+            feedback_parts.append(f"DO: {reason}")
+        if rv.get("donts"):
+            feedback_parts.append(f"DON'T: {rv['donts']}")
+        if rv.get("hint"):
+            feedback_parts.append(f"HINT: {rv['hint']}")
+        else:
+            feedback_parts.append(f"HINT: {reason}")
+        if rv.get("worker_on_track"):
+            feedback_parts.append("DIRECTION: Continue current approach — worker was on track.")
+        else:
+            feedback_parts.append("DIRECTION: Try a different approach.")
+            feedback_parts.append(f"KEY ISSUE (repeated): {reason}")
+            feedback_parts.append(f"KEY ISSUE (repeated): {reason}")
+        _append_feedback(task_dir, task_file, "\n".join(feedback_parts))
         # Model selection: escalate rank OR exclude current, not both.
         # Sticky force_model from task metadata overrides everything — if the
         # user pinned a model, retries stay on it (only thinking/iter changes).
@@ -2883,28 +2990,89 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             f"REFLECTION: [{diag['cause']}] {diag['suggestion']}")
 
 
+def _apply_system_env(content):
+    """Parse _System: from task frontmatter and apply as ENV overrides.
+    Returns dict of {key: old_value_or_None} for restore."""
+    try:
+        parsed = parse_task(content)
+        raw = parsed["meta"].get("_System", "")
+    except TaskFormatError:
+        raw = ""
+    if not raw:
+        return {}
+    saved = {}
+    for pair in raw.split(";"):
+        pair = pair.strip()
+        if "=" not in pair:
+            continue
+        k, v = pair.split("=", 1)
+        k, v = k.strip(), v.strip()
+        saved[k] = os.environ.get(k)
+        os.environ[k] = v
+    if saved:
+        print(f"[_System] ENV overrides: {list(saved.keys())}", flush=True)
+    return saved
+
+
+def _restore_system_env(saved):
+    """Restore ENV values saved by _apply_system_env."""
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
 def run_sam(task_dir, task_file="top.md", depth=0):
     """Top-level entry. Creates root node, prescans once, runs SAM.
     Returns (result_string, final_rank, final_model)."""
     with open(os.path.join(task_dir, task_file)) as f:
         content = f.read()
-    memory = _read_memory(task_dir)
-    global_memory = _read_global_memory()
-    plan = prescan(content, task_dir, memory, global_memory, task_file)
-    fm = plan.get("force_model")
-    cm = plan.get("control_model")
-    model = pam.select(plan["rank"], usage=_usage, force_model=fm)["name"]
 
-    root = AgentNode(
-        agent_id=os.path.basename(task_dir),
-        task_dir=task_dir, task_file=task_file,
-        model=model, depth=depth, rank=plan["rank"],
-        thinking=plan.get("thinking", False),
-        thinking_budget=plan.get("thinking_budget", 0),
-        force_model=fm)
+    # Apply _System: ENV overrides before prescan (restored after task completes)
+    saved_env = _apply_system_env(content)
+    try:
+        memory = _read_memory(task_dir)
+        global_memory = _read_global_memory()
+        plan = prescan(content, task_dir, memory, global_memory, task_file)
+        # Worker model: task ForceModel → WORKER_MODEL env → pam.select(rank)
+        fm = plan.get("force_model") or os.environ.get("WORKER_MODEL") or None
+        # Review model: task ControlModel → REVIEW_MODEL env → pam.highest()
+        cm = plan.get("control_model") or os.environ.get("REVIEW_MODEL") or None
+        model = pam.select(plan["rank"], usage=_usage, force_model=fm)["name"]
 
-    result = _run_sam(root, plan=plan, control_model=cm)
-    return result, root.rank, root.model, cm, plan.get("no_memory", False), plan.get("task_group")
+        root = AgentNode(
+            agent_id=os.path.basename(task_dir),
+            task_dir=task_dir, task_file=task_file,
+            model=model, depth=depth, rank=plan["rank"],
+            force_model=fm)
+
+        result = _run_sam(root, plan=plan, control_model=cm)
+
+        # --- Timing stats (verbose, no effect on return values) ---
+        _sam_wall = time.time() - getattr(root, '_task_wall_start', time.time())
+        _llm_times = getattr(root, 'llm_times', [])
+        _llm_total = sum(_llm_times)
+        _tool_total = getattr(root, 'tool_time_total', 0.0)
+        _other = max(_sam_wall - _llm_total - _tool_total, 0.0)
+        _pct = lambda v: f"{100*v/_sam_wall:.1f}%" if _sam_wall > 0 else "n/a"
+        print(f"\n=== Timing ===")
+        print(f"Wall: {_sam_wall:.1f}s | LLM: {_llm_total:.1f}s ({_pct(_llm_total)}) | "
+              f"Tools: {_tool_total:.1f}s ({_pct(_tool_total)}) | Other: {_other:.1f}s ({_pct(_other)})")
+        if _llm_times:
+            _avg = _llm_total / len(_llm_times)
+            _trend = "flat"
+            if len(_llm_times) >= 3:
+                _f3 = sum(_llm_times[:3]) / 3
+                _l3 = sum(_llm_times[-3:]) / 3
+                if _f3 > 0 and _l3 / _f3 > 1.5:
+                    _trend = "increasing"
+            _ts = ", ".join(f"{t:.1f}" for t in _llm_times)
+            print(f"LLM/iter: [{_ts}] avg={_avg:.1f}s (trend: {_trend})")
+
+        return result, root.rank, root.model, cm, plan.get("no_memory", False), plan.get("task_group")
+    finally:
+        _restore_system_env(saved_env)
 
 
 # ============================================================
@@ -3177,7 +3345,7 @@ if __name__ == "__main__":
             iterations=iterations, elapsed=f"{elapsed:.1f}s",
             usage=json.dumps(_usage),
             final_rank=final_rank, final_model=final_model,
-            result=result[:300])
+            result=result)
 
     print(f"\n=== Result ({elapsed:.1f}s, {iterations} iters, "
           f"rank={final_rank}, model={final_model}) ===")
