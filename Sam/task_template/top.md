@@ -1,6 +1,6 @@
 ---
 Rank: 2
-Timeout: 180
+ThinkTime: 180
 BashTime: 60
 Skills: text_stats
 ForceModel: gemma4
@@ -33,22 +33,25 @@ shares experience within the `data` category.
 <!--
 METADATA REFERENCE (inside --- fences, all optional):
 
-Rank: N          — Task difficulty (0=trivial, 4=complex). Determines model.
-Timeout: N       — Wall time limit in seconds (own time, excludes subtasks).
+Rank: N          — Task difficulty (0=trivial, 5=very complex). Default: DEFAULT_RANK (3).
+                   Controls model selection AND total wall time per rank.
+ThinkTime: N     — LLM-only time cap per SAM (excludes bash). -1 = unlimited.
+                   Inherits to subtasks.
 BashTime: N      — Max bash call timeout. -1 = no limit (for SLURM/training).
-ThinkTime: N     — LLM time cap per attempt. -1 = unlimited.
 Skills: a, b     — Comma-separated skill names from Nam/skills/.
 GPU: V           — no | local | 1-4 | all | ALL | slurm | on (default: no).
+MinGPU: N        — Bench skips task if local GPU count < N.
 Slurm: V         — off | on (default: off). on implies BashTime: -1.
 SlurmHours: N    — Wall hours for SLURM allocation (default 4).
 SlurmCpus: N     — CPUs per task in SLURM (default 32).
-ForceModel: name — Pin worker to exact model name.
+ForceModel: name — Pin worker to exact model name (bypasses Pam).
 ControlModel: V  — Pin prescan/review model.
-Thinking: N      — Force thinking mode with budget N tokens.
 NoMemory: on|off — No global memory/history (clean-room). Default: off.
 TaskGroup: name  — Cross-task domain memory (independent of NoMemory).
 CommonHome: V    — ro | rw | disable (default: ro).
 CommonStorage: V — rw | ro | disable (default: rw).
+_System: K=V;... — Per-task ENV overrides (hidden from agent). E.g.
+                   `_System: PRESCAN_MODE=llm; WORKER_MODEL=gemma4-thinking`
 _PrivateKey: V   — Keys starting with _ are driver-private (hidden from agent).
 
 VARIANT NAMING:

@@ -73,7 +73,7 @@ MAX_BASH_TIME = int(os.environ.get("MAX_BASH_TIME", "300"))  # max seconds per b
 # Safety net only — bash is already capped separately. Rank is otherwise
 # purely a hint to Pam for model selection; iteration count is bounded
 # by MAX_ITERATIONS_WORK, and LLM-only wall (if any) comes from per-task
-# Timeout/ThinkTime metadata, not from a rank-default table.
+# ThinkTime metadata, not from a rank-default table.
 TOTAL_WALL_PER_RANK = os.environ.get("TOTAL_WALL_PER_RANK", "600,1800,3600,9000,21600,43200")
 _total_wall_limits = [int(x) for x in TOTAL_WALL_PER_RANK.split(",")]
 # Context caps (chars). Full content always available via tools.
@@ -570,7 +570,7 @@ def prescan(task_content, task_dir, memory, global_memory, task_file="top.md"):
     except TaskFormatError:
         meta = {}
     rank_match = meta.get("Rank")
-    think_time_match = meta.get("ThinkTime") or meta.get("Timeout")
+    think_time_match = meta.get("ThinkTime")
     bash_time_match = meta.get("BashTime")
     skills_match = meta.get("Skills")
     force_model_match = meta.get("ForceModel")

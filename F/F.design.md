@@ -105,11 +105,6 @@ $BASEDIR/
 │   ├── F.debug.sh          # Interactive container shell (continue a task manually)
 │   ├── F.design.md         # This file (technical reference)
 │   ├── F.usage.md          # Usage guide (SciFi reads this)
-│   ├── .misc/              # Archived/superseded scripts
-│   │   ├── driver.sh.archived    # (replaced by portal.py)
-│   │   ├── evolution.sh.archived # (replaced by portal.py)
-│   │   ├── ask.sh.archived       # (replaced by portal.py)
-│   │   └── ...
 │   ├── run/                # Global state (persistent across runs)
 │   │   ├── .global_memory.md      # Cross-task knowledge (evolution writes)
 │   │   ├── .global_history.md     # System-level tape (append-only)
@@ -946,12 +941,11 @@ All optional, all hints for prescan (overridable by review on retry):
 | Field | Format | Default | Purpose |
 |-------|--------|---------|---------|
 | `Rank` | `Rank: N` | prescan decides | Task difficulty (0-5), controls worker model selection |
-| `ThinkTime` | `ThinkTime: N` | none (no limit) | LLM time cap per SAM in seconds, excludes bash/tool time. -1 = no limit. Inherits to subtasks. (`Timeout` accepted as deprecated alias) |
+| `ThinkTime` | `ThinkTime: N` | none (no limit) | LLM time cap per SAM in seconds, excludes bash/tool time. -1 = no limit. Inherits to subtasks. |
 | `BashTime` | `BashTime: N` | MAX_BASH_TIME (300) | Per-bash-call cap (-1 = none) |
 | `Skills` | `Skills: a, b` | prescan decides | Comma-separated skill names |
 | `ForceModel` | `ForceModel: name` | (none) | Pin worker to exact model name (bypasses rank selection) |
 | `ControlModel` | `ControlModel: name or N` | highest | Pin prescan/review/reflect model. Name = exact model, N = highest at-or-below rank N. Rank < 0 models use text-only review path. |
-| ~~`Thinking`~~ | removed | — | Thinking is controlled via model selection (rank.yaml `thinkable: true` + `max_thinking_budget`), not per-task metadata |
 | `NoMemory` | `NoMemory: on\|off` | off | When on, task does not read global memory and does not append to global history (clean-room run, no cross-task feedback). Does NOT affect TaskGroup memory. |
 | `TaskGroup` | `TaskGroup: name` | (none) | Opt-in cross-task memory with structured ledger. See **TaskGroup Memory** below. Independent of NoMemory. |
 | `CommonHome` | `CommonHome: ro\|rw\|disable` | rw | Mount F/home → /home. rw = persistent writes (default). ro = read-only (tmpfs absorbs writes to image paths but NOT to bind mounts — ro /home will error on writes). disable = no mount. Portal symlinks ~/.local and ~/.cache to /tmp to prevent cross-run pollution. |
@@ -1046,16 +1040,23 @@ constants. Documented here for future study.
 | Constant | Value | History |
 |----------|-------|---------|
 | `ATTEMPT_HEADER` | `True` | Writes `## Attempt N` markdown headers between SAM-attempt feedback blocks. The chain-glue prompt depends on this format ("LATEST Attempt block"). All historical bench data ran with this on; no controlled comparison exists. |
-| `PRESCAN_MODE` | `metadata` | `metadata` (deterministic) or `llm` (multi-turn LLM with read-only tools). Replaced `DYNAMIC_MAX_ITER`. |
+| `PRESCAN_MODE` | `metadata` | `metadata` (deterministic) or `llm` (multi-turn LLM with read-only tools). |
 | `PRESCAN_MODEL` | `gemma4` | Model for LLM prescan. Think/non-think determined by model. Fallback: task ControlModel → PRESCAN_MODEL → pam.highest(). |
 | `DEFAULT_RANK` | `3` | Default rank when task has no Rank: in frontmatter (metadata mode). |
 
-### Studied features (tried, no longer enabled)
+### Bitter lessons (tried, measured, dropped)
 
-| Idea | Result | Status |
-|------|--------|--------|
-| `PROMOTE_RETRY_FEEDBACK=1` (prepend reviewer feedback at top of `user_msg` instead of appending at bottom) | X3/X4 ablation (Apr 29) showed pass-rate regression vs `=0`. n was small (~10 each) — not strictly conclusive but the trend was clear enough to drop. | **Removed**: branch and env knob deleted. Canonical behavior = bottom-append. |
-| `MAX_REVIEW_ITER_VERIFY` (auto-bump done-reviewer iter cap when Expect mentions verify/test/build keywords) | Keyword-matched without changing the reviewer prompt — half-feature. No measured effect distinct from setting `MAX_ITERATIONS_REVIEW_DONE` directly. | **Removed**: replaced by per-agent caps that apply uniformly. |
+These are real failures from controlled bench rounds. Documented as warnings — don't reintroduce without strong evidence.
+
+| Idea | Result |
+|------|--------|
+| Prepend reviewer feedback at top of `user_msg` instead of appending at bottom | Pass-rate regression. The agent reads task spec first; review feedback at top distracts from the task. Bottom-append is canonical. |
+| Auto-bump done-reviewer iter cap on verify/test/build keywords | Keyword-matched without changing the reviewer prompt — half-feature. No measured effect distinct from setting the cap directly. |
+| Disable RECAP (re-injection of task spec) | Regressed both think (97→80%) and non-think (77→73%) pass rates. Context drift is real; periodic re-grounding helps. |
+| Compound-bug prompt ("if two opposite approaches both fail, there is a second bug") | Regressed 80→50%. Task-specific reasoning hints in system prompt hurt generalization. |
+| Inject Verilog port-list comment to prevent fabrication | At 56-message accumulated context, fabrication rate went 60% → 70%. Comments drown in polluted context. Fresh SAM + explicit retry feedback is the real fix (0% fabrication). |
+| `strip_thinking_response=true` (Venice gateway) | Stripped ALL content including the answer, not just thinking. |
+| Hardcoded model name as default in driver code | Couples driver to specific provider/model. Use `pam.highest()` fallback instead — keeps driver provider-agnostic. |
 
 ### gateway.rank.yaml Fields
 

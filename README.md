@@ -28,9 +28,13 @@ SciFi help                      # actually you don't need "" if shell is happy
 
 Each task runs as a closed loop: **Prescan → Agent Loop → Independent Review**.
 
-1. **Prescan** — a control model reads the task, assigns a difficulty rank, selects skills, and plans subtasks
-2. **Agent Loop** — a worker model executes the Todo with tools (bash, file I/O, web fetch, memory, sub-agents), iterating until it claims `done` or exhausts its budget
-3. **Independent Review** — a different model verifies every Expect item using its own tool calls. If verification fails, the task retries with feedback. If the reviewer itself fails, a cascade of fallback reviewers takes over
+1. **Prescan** — reads task metadata (rank, skills, subtasks, model overrides). Default `metadata` mode is deterministic (no LLM); `llm` mode runs a multi-turn analysis with read-only tools when complex subtask decomposition is needed.
+2. **Agent Loop** — a worker model executes the Todo with tools (bash, file I/O, web fetch, memory, sub-agents). Worker auto-uses think/non-think prompt + iter cap based on model. Short-SAM design (25 iters per attempt) + retry loop (up to 20 retries) keeps context fresh — prevents context-induced fabrication.
+3. **Independent Review** — a different model (thinking model by default) verifies every Expect item using its own tool calls. Review can either `verdict` (verify pass) or `decision` (guide retry with structured DOS/DONTS/HINT feedback). If verification fails, the task retries with accumulated feedback. Cascade of fallback reviewers handles primary reviewer failure.
+
+**Context management:** Tool results auto-truncated (head+tail lines, char cap). Old results compacted as conversation grows. Recap re-injects task spec every N iters. Compaction validated against real Cam data — 62% context savings, 0% critical info loss.
+
+**Timing stats:** After each task, prints LLM/tool/other time breakdown with trend detection — surfaces context rot or provider slowdown immediately.
 
 Every `done` claim is independently verified — the worker's word is never trusted. This makes the system robust against hallucination and fabrication.
 
@@ -89,17 +93,20 @@ Common fields and usually we leave them default:
 
 | Field | Default | What it does |
 |-------|---------|--------------|
-| `Rank: N` | auto | Difficulty. 0 = trivial, 1 = typical, 2 = reasoning, 3+ = hard |
-| `ForceModel: name` | rank-based | Pin worker model (e.g. `llama4-scout`) |
-| `ControlModel: name` | highest | Pin review model (e.g. `qwen3-coder`) |
-| `Thinking: N` | off | Force thinking mode with N token budget |
-| `BashTime: N` | 600 | Max seconds per bash call. `-1` = unlimited |
-| `Skills: a, b` | auto | Skills to inject |
-| `NoMemory: on\|off` | `off` | Clean-room run: don't read global memory, don't write global history |
-| `CommonHome: rw\|ro\|disable` | `rw` | Shared home mount (`F/home/` → `/home`) |
-| `CommonStorage: rw\|ro\|disable` | `rw` | Shared storage mount (`F/mnt/` → `/mnt`) |
-| `GPU: no\|local\|slurm\|on` | `no` | GPU policy |
-| `Slurm: off\|on` | `off` | SLURM submission access |
+| `Rank: N` | `DEFAULT_RANK` (3) | Difficulty (0=trivial, 5=very complex). Controls model selection AND total wall time per rank. |
+| `ForceModel: name` | pam selection | Pin worker model. Bypasses Pam rank-based selection. |
+| `ControlModel: name` | `pam.highest()` | Pin review/prescan model. |
+| `ThinkTime: N` | none (no limit) | LLM-only time cap per SAM (excludes bash/tool time). `-1` = no limit. Inherits to subtasks. |
+| `BashTime: N` | 300 | Max seconds per bash call. `-1` = unlimited. |
+| `Skills: a, b` | auto | Skills to inject. |
+| `NoMemory: on\|off` | `off` | Clean-room run: don't read global memory, don't write global history. |
+| `CommonHome: rw\|ro\|disable` | `rw` | Shared home mount (`F/home/` → `/home`). |
+| `CommonStorage: rw\|ro\|disable` | `rw` | Shared storage mount (`F/mnt/` → `/mnt`). |
+| `GPU: no\|local\|slurm\|on` | `no` | GPU policy. |
+| `Slurm: off\|on` | `off` | SLURM submission access. |
+| `MinGPU: N` | none | Bench skips task if local GPU count < N. |
+| `TaskGroup: name` | none | Opt-in cross-task shared memory group. |
+| `_System: KEY=val; ...` | none | Per-task ENV overrides (e.g. `_System: PRESCAN_MODE=llm`). Hidden from agent. |
 
 ## Agent Environment
 
@@ -161,18 +168,29 @@ Chat with `SciFi` to explore the system (e.g. `task maker` and `skill maker`), o
 
 `ENV.sh` is the central configuration file — every script and entry point sources it first. It sets all paths, driver limits, and model group names. Key sections and **in most cases no need to change anything**:
 
-| Variable | Purpose |
-|----------|---------|
-| `APPTAINER`, `SIF`, `OVERLAY` | Container runtime and image paths |
-| `GATEWAY_PORT` | Auto-derived from UID, no manual setup needed |
-| `FALLBACK_HIGHEST`, `FALLBACK_WORKING` | Fallback model groups when rank config is unavailable |
-| `SCIFI_MODEL` | Model group for the SciFi natural language interface |
-| `DEFAULT_ENV_SKILL` | Env skill auto-injected when a task declares none (`temp_env` / `local_env` / `common_env`) |
-| `MAX_ITERATIONS_WORK`, `MAX_ITERATIONS_REVIEW_DONE`, `MAX_ITERATIONS_REVIEW_FAIL`, `MAX_ITERATIONS_REFLECT` | Per-agent iter caps |
-| `MAX_RETRIES_REJECTED`, `MAX_RETRIES_EXHAUSTED` | Per-path retry caps (done-rejection within SAM, LOOP_EXHAUSTED across SAMs) |
-| `MAX_DEPTH` | Max subtask nesting |
-| `TOTAL_WALL_PER_RANK` | Hard wall-clock cap per rank (includes bash time) |
-| `MAX_EVOLVE_ITER` | Evolution loop limit |
+All numeric tuning knobs are commented out in `ENV.sh` with defaults shown. Defaults live in `F/driver.py`. Uncomment in `ENV.sh` to override.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `APPTAINER`, `SIF`, `OVERLAY` | (required) | Container runtime and image paths |
+| `GATEWAY_PORT` | UID-derived | LiteLLM gateway port |
+| `FALLBACK_HIGHEST`, `FALLBACK_WORKING` | (required) | Model groups when rank.yaml unavailable or exhausted |
+| `SCIFI_MODEL` | (required) | Model group for SciFi natural language interface |
+| `DEFAULT_ENV_SKILL` | `temp_env` | Env skill auto-injected when task declares none |
+| `REVIEW_MODEL` | `gemma4-thinking` | Review model (thinking model enables verify-from-fail). Comment out → `pam.highest()` |
+| `WORKER_MODEL` | unset | Force worker model globally. Bypasses Pam rank selection |
+| `PRESCAN_MODEL` | unset | Force prescan model. Default: `pam.highest()` |
+| `PRESCAN_MODE` | `metadata` | Prescan strategy: `metadata` (deterministic) or `llm` (multi-turn with read-only tools) |
+| `DEFAULT_RANK` | `3` | Rank used when task has no `Rank:` field |
+| `MAX_ITERATIONS_WORK` | `25` | Non-thinking worker iter cap per SAM |
+| `MAX_ITERATIONS_WORK_THINK` | `25` | Thinking worker iter cap per SAM (auto-detected via `pam.is_thinkable()`) |
+| `MAX_ITERATIONS_REVIEW_DONE`/`_FAIL` | `30`/`30` | Review iter caps |
+| `MAX_RETRIES_REJECTED`/`_EXHAUSTED` | `3`/`20` | Retry caps (done-rejection within SAM / LOOP_EXHAUSTED across SAMs) |
+| `RECAP_EVERY` | `5` | Re-inject task spec every N iters (prevents context drift) |
+| `TOTAL_WALL_PER_RANK` | `600,1800,3600,9000,21600,43200` | Hard wall per rank (incl. bash). rank 0=10m, 1=30m, 2=1h, 3=2.5h, 4=6h, 5=12h |
+| `MAX_DEPTH` | `5` | Max subtask nesting |
+| `TOOL_RESULT_CAP` | `10000` | Tool output truncation cap (line-based head+tail). `full_output=true` raises to 30K |
+| `MAX_EVOLVE_ITER` | `20` | Evolution loop limit |
 
 
 ## Important Notice

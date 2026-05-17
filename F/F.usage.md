@@ -179,19 +179,19 @@ What the agent needs to know.
 Legacy tasks (without `---` fences) still work via fallback in `driver.py`.
 
 Metadata (all optional, inside `---` fences):
-- `Rank` (0-4) — task difficulty, controls model selection
-- `Timeout` (seconds) — wall limit
-- `BashTime` (-1=unlimited) — per-bash-call cap
-- `ThinkTime` (-1=unlimited) — LLM time cap per attempt; propagates to subtasks
+- `Rank` (0-5) — task difficulty. Default: `DEFAULT_RANK` (3). Controls model selection AND `TOTAL_WALL_PER_RANK` (rank 0=10m, 1=30m, 2=1h, 3=2.5h, 4=6h, 5=12h)
+- `ThinkTime` (seconds, -1=unlimited) — LLM-only time cap per SAM (excludes bash/tool time). Inherits to subtasks
+- `BashTime` (-1=unlimited) — per-bash-call timeout cap
 - `Skills` (comma-separated) — skill names to inject
-- `ForceModel` — pin worker to exact model name
+- `ForceModel` — pin worker to exact model name (bypasses Pam rank selection)
 - `ControlModel` — pin review/prescan model (name or rank number)
-- `Thinking: N` — force thinking mode with budget N tokens from start
-- `NoMemory: on|off` — when on, do not read global memory and do not write global history (clean-room run). Does not affect TaskGroup memory
-- `TaskGroup: name` — opt-in cross-task memory. Tasks in the same group share domain lessons from failed runs. Stored at `F/run/.taskgroup_memory/<name>.md`. Independent of NoMemory
-- `CommonHome: ro|rw|disable` — mount F/home → /home (default: rw). Portal symlinks ~/.local and ~/.cache to /tmp to prevent cross-run pollution
+- `NoMemory: on|off` — clean-room run: no global memory read, no global history write. Does not affect TaskGroup memory
+- `TaskGroup: name` — opt-in cross-task memory. Tasks in same group share lessons from failed runs. Stored at `F/run/.taskgroup_memory/<name>.md`
+- `CommonHome: ro|rw|disable` — mount F/home → /home (default: rw)
 - `CommonStorage: rw|ro|disable` — mount F/mnt → /mnt (default: rw)
 - `GPU: no|local|slurm|on` — GPU policy (default: no)
+- `MinGPU: N` — bench skips task if local GPU count < N
+- `_System: KEY=val; KEY=val` — per-task ENV overrides (e.g. `_System: PRESCAN_MODE=llm; WORKER_MODEL=gemma4-thinking`). Underscore prefix hides from agent
     - `no` — never use GPU
     - `local` — use GPU only when host has nvidia-smi (no SLURM)
     - `slurm` — always submit to a SLURM GPU node (overrides default `Slurm: off`)
@@ -454,13 +454,13 @@ Three caps bound any SAM run; whichever fires first wins.
 
 | Cap | Default | Scope | Where |
 |-----|---------|-------|-------|
-| Iteration cap | `MAX_ITERATIONS_WORK=50` | Global, all ranks | `ENV.sh` |
-| LLM-only wall | (off unless task opts in) | Per-task `Timeout` / `ThinkTime` metadata | `top.md` |
-| Total wall (incl. bash) | `TOTAL_WALL_PER_RANK=3600,...` (uniform 1hr) | Per-rank, includes bash time | `ENV.sh` |
+| Iteration cap | `MAX_ITERATIONS_WORK=25` (nonthink) / `=25` (think) | Per-SAM, auto-selected by model | `ENV.sh` / driver.py |
+| LLM-only wall | (off unless task opts in) | Per-task `ThinkTime` metadata | `top.md` |
+| Total wall (incl. bash) | `TOTAL_WALL_PER_RANK=600,1800,3600,9000,21600,43200` | Per-rank (0..5), includes bash time | `ENV.sh` |
 
-**Read-only iterations are free:** only iterations with mutating tool calls (`bash`, `write_file`, `edit_file`, `done`, `subagent`) count against the budget. `read_file`, `memory_read`, and `compact` calls don't consume iterations, so agents can freely explore source files without penalty.
+**Read-only iterations are free:** only iterations with mutating tool calls (`bash`, `write_file`, `edit_file`, `done`, `subagent`) count against the budget.
 
-**Rank does NOT scale iteration or wall budgets** — it only hints model selection in Pam (which model tier handles the task). To give a task more LLM time, set `Timeout: N` (or `ThinkTime: N`) in its metadata. To give it more wall time including long bash, set `BashTime: -1` to disable the total wall cap.
+**Rank now controls wall time** (in addition to model selection). Total wall scales geometrically per rank: 10m, 30m, 1h, 2.5h, 6h, 12h. To give a task more LLM-only time, set `ThinkTime: N` in metadata. To disable per-bash-call cap, set `BashTime: -1`.
 
 ---
 
