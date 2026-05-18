@@ -16,7 +16,7 @@ This task is decomposed into four subtasks. The orchestrator (this file) sequenc
 
 The four subtasks must run in **strict sequential order** — each one depends on the artifacts produced by the previous one. They cannot be parallelized:
 
-1. `env.md` (Rank 1) — verifies the pre-built toolchain at `/mnt/envs/hgq` (auto-added to PATH by the driver) or falls back to a local install. Produces `env_status.txt` (`READY` or `FAIL: ...`). No prerequisites.
+1. `env.md` (Rank 1) — verifies the pre-built toolchain at `/mnt/sci_envs/fpga_toolchain` (use `activate_env` to add to PATH) or falls back to a local install. Produces `env_status.txt` (`READY` or `FAIL: ...`). No prerequisites.
 2. `compile.md` (Rank 2) — runs a clean Verilator build of the current `sim/src/stream_wrapper.v`. Produces `compile_status.txt` (`OK` or `FAIL: ...`), plus `compile_ok.log` or `compile_error.log`. Depends on env.md.
 3. `verify.md` (Rank 2) — runs the verify script in both modes against the golden dataset. Produces `verify_status.txt` (two lines, `nopause: PASS|FAIL` and `paused: PASS|FAIL`) plus `verify_nopause.log` and `verify_paused.log`. Depends on compile.md being `OK`.
 4. `complete.md` (Rank 3) — fills in the skeleton's `...` placeholders so compile and verify both succeed. This is the creative work of the task. Produces the final `nopause.log`, `paused.log`, `design_notes.md`, and `hypothesis_log.md`. Invoked whenever compile failed (including because of the skeleton's placeholders) or any verify mode failed.
@@ -33,9 +33,9 @@ Files in this task directory:
 - `sim/verify_golden.py` — verification driver. Do not modify.
 - `dataset/golden_X.csv`, `dataset/golden_Y.csv` — golden test vectors.
 
-**Watch out**: the skeleton contains in-file comments (e.g. "collect 10 kernel outputs", "190 * 10 bits") that may not match the actual module ports. Always cross-check against the concrete port widths in `kernel_wrapper.v` and `dense_wrapper.v` and against the constants in `stream_wrapper_binder.cc` — those are the ground truth. If the comments contradict the wrapper ports, trust the ports.
+**Important**: Always derive dimensions from the concrete port widths in `kernel_wrapper.v` and `dense_wrapper.v` and the constants in `stream_wrapper_binder.cc` — those are the ground truth.
 
-The base micromamba env (`/F/mamba`) is the driver's and is read-only — never install into it. Always prefer `./` for things the task needs to write. The driver automatically adds `/mnt/envs/hgq/envs/hgq/bin` to PATH so `verilator`, `g++`, `make`, and `python3` (with numpy) are directly callable as bare commands — no wrapper scripts needed. `BashTime: -1` is set because verilator build and verify can each take ~60 seconds.
+Use the common_env skill (`activate_env`) to activate the toolchain at `/mnt/sci_envs/fpga_toolchain/envs/hgq` — after activation, `verilator`, `g++`, `make`, and `python3` (with numpy) are directly callable as bare commands. `BashTime: -1` is set because verilator build and verify can each take ~60 seconds.
 
 The orchestrator's deliverables are the canonical end-state files: `nopause.log` (containing `PASSED: All`), `paused.log` (containing `PASSED: All`), and `notes.md` (a one-paragraph summary of the run). When complete.md runs, it produces `nopause.log` and `paused.log` directly. If verify already passes (unexpected for this task but handled for symmetry), the orchestrator copies `verify_nopause.log` → `nopause.log` and `verify_paused.log` → `paused.log`.
 

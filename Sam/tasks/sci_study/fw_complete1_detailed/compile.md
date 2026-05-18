@@ -10,7 +10,7 @@ NoMemory: on
 
 Run a clean Verilator + g++ build of the current `sim/src/stream_wrapper.v` and report whether the build succeeds. This is a build-only check — do not run any verification, do not modify any source.
 
-Toolchain: NOT pre-installed. The parent task or env.md subtask installs it into a local micromamba env. If env.sh exists, it is auto-sourced.
+Toolchain: pre-installed at `/mnt/sci_envs/fpga_toolchain`. Use `activate_env` to add it to PATH.
 
 Build driver: `make -f build_binder.mk` from inside `sim/`. Target `clean` wipes prior state, target `slow` performs a clean Verilator + g++ build. On success the build leaves a `libstream_wrapper_*.so` file in `sim/`.
 

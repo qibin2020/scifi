@@ -24,7 +24,7 @@ module stream_wrapper (
     );
 
     // ----------------------------------------------------------------
-    // Shift register to collect 10 kernel outputs to fit into dense layer
+    // Shift register to collect the kernel outputs to fit into dense layer
     // ----------------------------------------------------------------
     localparam integer SHIFT_REG_WIDTH = ...
     reg [SHIFT_REG_WIDTH-1:0] shift_reg =
@@ -37,8 +37,8 @@ module stream_wrapper (
     // ----------------------------------------------------------------
     wire [OUTPUT_ACTUAL-1:0] dense_out;
     dense_wrapper u_dense (
-        .model_inp (shift_reg),   // 190 * 10 bits
-        .model_out(dense_out)     // 19 bits
+        .model_inp (shift_reg), 
+        .model_out(dense_out)
     );
 
     ...

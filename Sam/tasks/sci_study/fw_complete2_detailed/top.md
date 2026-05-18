@@ -18,9 +18,7 @@ The design composes two pre-built combinational submodules into a streaming data
 
 Between them you need a shift register that buffers kernel outputs over II valid input cycles, and control logic that pulses `out_valid` exactly once when the dense layer's output is ready. The verifier (`sim/verify_golden.py`) runs the simulation in two modes — baseline (`--no-pause`) and backpressure (`--inp-pause 0.3 --seed 42`). Both must pass against the golden dataset in `dataset/`.
 
-The toolchain (verilator, g++, make, python3 with numpy) is NOT pre-installed. Install into a local micromamba env first:
-    MAMBA_ROOT_PREFIX=./mamba_env micromamba create -n hgq -c conda-forge verilator gxx_linux-64 make "python>=3.10" numpy -y
-Then write env.sh to put it on PATH.
+The required toolchain is at **prefix** `/mnt/sci_envs/fpga_toolchain` with **env name** `hgq` (full path: `/mnt/sci_envs/fpga_toolchain/envs/hgq`). It contains verilator, g++, make, python3, numpy. Use the common_env skill to discover and activate it; if missing, create it there with the same prefix + env name. The task directory is writable.
 
 ## Todo
 
@@ -29,7 +27,10 @@ Then write env.sh to put it on PATH.
 3. Read `sim/stream_wrapper_binder.cc` to understand the testbench protocol (II value, CHUNK, BW_INP, BW_OUT).
 4. Design and implement the body of stream_wrapper.v.
 5. Build with `make -f build_binder.mk slow` from `sim/`.
-6. Run both verify modes; both must print "PASSED: All".
+6. Run both verify modes, capturing output to log files:
+   `cd sim && python3 verify_golden.py --no-pause 2>&1 | tee ../nopause.log`
+   `cd sim && python3 verify_golden.py --inp-pause 0.3 --seed 42 2>&1 | tee ../paused.log`
+7. Write `notes.md` with a one-paragraph summary of the design and verification result.
 
 ## Expect
 

@@ -32,9 +32,7 @@ The dataset is in `dataset/`:
 - `golden_X.csv` — 100 input waveforms, each with 500 int32 features
 - `golden_Y.csv` — 100 expected int32 output values, one per waveform
 
-The toolchain (verilator, g++, make, python3 with numpy) is NOT pre-installed. Install into a local micromamba env first:
-    MAMBA_ROOT_PREFIX=./mamba_env micromamba create -n hgq -c conda-forge verilator gxx_linux-64 make "python>=3.10" numpy -y
-Then write env.sh to put it on PATH.
+The required toolchain is at **prefix** `/mnt/sci_envs/fpga_toolchain` with **env name** `hgq` (full path: `/mnt/sci_envs/fpga_toolchain/envs/hgq`). It contains verilator, g++, make, python3, numpy. Use the common_env skill to discover and activate it; if missing, create it there with the same prefix + env name. The task directory is writable.
 
 ### Required external contract (do NOT change)
 

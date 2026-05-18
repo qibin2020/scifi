@@ -14,7 +14,7 @@ This is design work, not bug hunting. The only file you may modify is `sim/src/s
 
 ### Toolchain
 
-`The toolchain is NOT pre-installed — install via micromamba or check if env.sh was written by an earlier subtask.
+The toolchain is pre-installed at `/mnt/sci_envs/fpga_toolchain`. Use the common_env skill (`activate_env`) to add it to PATH.
 
 ### The design
 
@@ -22,7 +22,7 @@ A `stream_wrapper` module that composes a combinational conv kernel and a combin
 
 ### Ground truth — read these to get the concrete numbers
 
-Never trust the skeleton's in-line comments (e.g. "collect 10 kernel outputs", "190 * 10 bits") — they may be stale or misleading. Derive dimensions from these authoritative sources:
+Derive all dimensions from these authoritative sources:
 
 - `sim/src/kernel_wrapper.v` — declares the kernel's input and output widths. The output width is your `KERNEL_OUTPUT_BIT`.
 - `sim/src/dense_wrapper.v` — declares the dense layer's input and output widths. The dense layer's input width is the required `SHIFT_REG_WIDTH`. The output width is the raw dense output before zero-extension to 32 bits.

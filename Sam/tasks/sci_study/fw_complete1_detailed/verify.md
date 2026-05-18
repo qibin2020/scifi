@@ -10,7 +10,7 @@ NoMemory: on
 
 Run the Verilator-built simulation against the golden dataset in two modes and report which one(s) pass. Verification only — do not modify any source.
 
-Toolchain: NOT pre-installed. The parent task or env.md subtask installs it into a local micromamba env. If env.sh exists, it is auto-sourced.
+Toolchain: pre-installed at `/mnt/sci_envs/fpga_toolchain`. Use `activate_env` to add it to PATH.
 
 The verify script is `sim/verify_golden.py`. It loads `dataset/golden_X.csv` as inputs, drives them through the Verilator-built shared library, compares outputs to `dataset/golden_Y.csv`, and prints `PASSED: All N outputs match golden reference.` (exit 0) or `FAILED: M/N mismatches` (exit 1).
 
