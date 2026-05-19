@@ -1,0 +1,13 @@
+{
+  "name": "ds_fw_quick",
+  "state_paths": ["F/mnt"],
+  "lock_model": "deepseek-v4-flash-on",
+  "review_model": "deepseek-v4-pro-on",
+  "gateway_probe": {
+    "abort_below_tps": 4
+  },
+  "batches": [
+    {"name": "fw_bootstrap", "task": "sci_study/fw_bootstrap", "n": 1, "parallel": 1, "state": "fresh", "pin": "warm"},
+    {"name": "fw_c1",        "task": "sci_study/fw_complete1_detailed", "n": 5, "parallel": 5, "state": "warm"}
+  ]
+}

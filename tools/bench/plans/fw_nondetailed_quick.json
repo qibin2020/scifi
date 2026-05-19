@@ -1,0 +1,15 @@
+{
+  "name": "fw_nondetailed_quick",
+  "state_paths": ["F/mnt"],
+  "lock_model": "gemma4",
+  "review_model": "gemma4-thinking",
+  "gateway_probe": {
+    "abort_below_tps": 4
+  },
+  "batches": [
+    {"name": "fw_bootstrap", "task": "sci_study/fw_bootstrap", "n": 1, "parallel": 1, "state": "fresh", "pin": "warm"},
+    {"name": "fw_c1", "task": "sci_study/fw_complete1", "n": 2, "parallel": 6, "state": "warm"},
+    {"name": "fw_c2", "task": "sci_study/fw_complete2", "n": 2, "parallel": 6, "state": "warm"},
+    {"name": "fw_c3", "task": "sci_study/fw_complete3", "n": 2, "parallel": 6, "state": "warm"}
+  ]
+}

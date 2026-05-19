@@ -1,0 +1,13 @@
+{
+  "name": "smoke_test",
+  "state_paths": ["F/mnt"],
+  "lock_model": "gemma4",
+  "review_model": "gemma4-thinking",
+  "gateway_probe": {
+    "abort_below_tps": 4
+  },
+  "batches": [
+    {"name": "fw_bootstrap", "task": "sci_study/fw_bootstrap", "n": 1, "parallel": 1, "state": "fresh", "pin": "warm"},
+    {"name": "fw_c1", "task": "sci_study/fw_complete1", "n": 1, "parallel": 1, "state": "warm"}
+  ]
+}

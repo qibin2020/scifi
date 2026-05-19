@@ -58,7 +58,7 @@ STAGGER_S = 3   # between parallel run launches — keeps cam.py filenames uniqu
 # ─── helpers ──────────────────────────────────────────────────────────────
 
 def utc_compact():
-    return datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def gateway_url():
@@ -204,6 +204,88 @@ _RANK_ENTRY_RE = re.compile(
 )
 
 
+def _parse_model_fields(content, model_name):
+    """Extract rank + yaml fields for *model_name* from rank.yaml text.
+
+    Searches active entries first, then commented-out entries.  Returns a dict
+    with at least {rank, thinkable, budget} and optionally max_thinking_budget
+    and max_tokens if present in the original entry.  Raises SystemExit if the
+    model is not found at all.
+    """
+    # --- helper: given a block of consecutive yaml lines for one entry,
+    #     extract key: value pairs we care about.
+    _FIELD_RE = re.compile(r"^[ \t]*(\w+):[ \t]*(\S+)")
+
+    def _fields_from_lines(lines):
+        d = {}
+        for ln in lines:
+            m = _FIELD_RE.match(ln)
+            if m:
+                d[m.group(1)] = m.group(2)
+        return d
+
+    # Split content into lines for block-oriented scanning.
+    lines = content.splitlines()
+
+    # Try active entries first, then commented.
+    for commented in (False, True):
+        for i, raw in enumerate(lines):
+            # Detect "- rank:" line (active or commented)
+            if commented:
+                m = re.match(r"^[ \t]*#[ \t]*-[ \t]*rank:[ \t]*(-?\d+)", raw)
+            else:
+                m = re.match(r"^[ \t]*-[ \t]*rank:[ \t]*(-?\d+)", raw)
+            if not m:
+                continue
+
+            # Collect the continuation lines that belong to this entry
+            block = [raw]
+            for j in range(i + 1, len(lines)):
+                nxt = lines[j]
+                if commented:
+                    # continuation = commented indented line (not a new "- rank:")
+                    if re.match(r"^[ \t]*#[ \t]+\w+:", nxt) and not re.match(r"^[ \t]*#[ \t]*-[ \t]*rank:", nxt):
+                        block.append(nxt)
+                    else:
+                        break
+                else:
+                    if re.match(r"^[ \t]+\w+:", nxt) and not re.match(r"^[ \t]*-[ \t]*rank:", nxt):
+                        block.append(nxt)
+                    else:
+                        break
+
+            # Strip comment prefixes and list-item dash so field extraction
+            # works uniformly (the first line is "- rank:" not "rank:").
+            cleaned = []
+            for idx, ln in enumerate(block):
+                if commented:
+                    ln = re.sub(r"^([ \t]*)#[ \t]*", r"\1", ln)
+                if idx == 0:
+                    # "  - rank: 2" → "    rank: 2"
+                    ln = re.sub(r"-\s*", "  ", ln, count=1)
+                cleaned.append(ln)
+
+            fields = _fields_from_lines(cleaned)
+            entry_name = fields.get("name", "")
+            # Strip inline comments / trailing whitespace from name
+            entry_name = entry_name.split("#")[0].strip()
+            if entry_name != model_name:
+                continue
+
+            # Found — build result dict
+            result = {
+                "rank":      int(fields.get("rank", 0)),
+                "budget":    int(fields.get("budget", -1)),
+                "thinkable": fields.get("thinkable", "false").split("#")[0].strip(),
+            }
+            for opt in ("max_thinking_budget", "max_tokens"):
+                if opt in fields:
+                    result[opt] = int(fields[opt].split("#")[0].strip())
+            return result
+
+    return None  # not found
+
+
 def lock_model(model_name):
     """Rewrite Pam/gateway.rank.yaml to keep only <model_name>.
 
@@ -224,37 +306,36 @@ def lock_model(model_name):
         print(f"[lock_model] already locked — no change.")
         return None
 
-    matching = [r for r, n in active if n == model_name]
-    if not matching:
-        # Try commented-out entries too, so plans can re-enable a known model
-        # NOTE: \b after escaped name is unsafe — '-' is a word boundary in
-        # regex, so 'deepseek-v4-pro\b' would match 'deepseek-v4-pro-on'.
-        # Require the next char be whitespace, '#' (start of inline comment),
-        # or end-of-line, so the name terminates cleanly.
-        commented = re.findall(
-            r"^[ \t]*#[ \t]*-[ \t]*rank:[ \t]*(-?\d+)[ \t]*\n[ \t]*#[ \t]*name:[ \t]*"
-            + re.escape(model_name) + r"[ \t]*(?:#|$)",
-            content, re.MULTILINE,
-        )
-        if not commented:
-            raise SystemExit(f"ERROR: model '{model_name}' not found (active or commented) in {rank_path}")
-        target_rank = int(commented[0])
-    else:
-        target_rank = matching[0]
+    # Parse full model fields (rank, thinkable, optional max_thinking_budget/max_tokens)
+    fields = _parse_model_fields(content, model_name)
+    if fields is None:
+        raise SystemExit(f"ERROR: model '{model_name}' not found (active or commented) in {rank_path}")
+
+    target_rank = fields["rank"]
+    thinkable   = fields["thinkable"]
 
     bak = _backup(rank_path)
+    # Build entry lines preserving the original model's properties
+    entry_lines = (
+        f"  - rank: {target_rank}\n"
+        f"    name: {model_name}\n"
+        f"    budget: {fields['budget']}\n"
+        f"    thinkable: {thinkable}\n"
+    )
+    if "max_thinking_budget" in fields:
+        entry_lines += f"    max_thinking_budget: {fields['max_thinking_budget']}\n"
+    if "max_tokens" in fields:
+        entry_lines += f"    max_tokens: {fields['max_tokens']}\n"
+
     new_content = (
         f"# Auto-generated by tools/bench/bench.py — locked to {model_name} only.\n"
         f"# Original at: {os.path.basename(bak)}\n"
         f"models:\n"
-        f"  - rank: {target_rank}\n"
-        f"    name: {model_name}\n"
-        f"    budget: -1\n"
-        f"    thinkable: false\n"
-        f"connection_max: 10\n"
+        + entry_lines
+        + f"connection_max: 10\n"
     )
     open(rank_path, "w").write(new_content)
-    print(f"[lock_model] WROTE: {rank_path}  (rank {target_rank}, only {model_name})")
+    print(f"[lock_model] WROTE: {rank_path}  (rank {target_rank}, thinkable={thinkable}, only {model_name})")
     print(f"[lock_model] backup: {os.path.basename(bak)}")
     return bak
 
@@ -398,18 +479,46 @@ def _basename(p):
     return os.path.basename(p.rstrip("/"))
 
 
+# Subdirs within state_paths that persist across fresh/restore operations.
+_PRESERVE_DIRS = ("sci_shared",)
+
+
+def _preserve_save(full, ts):
+    """Save preserved subdirs out of full before it gets moved/deleted.
+    Returns list of (saved_path, relative_name) for later restore."""
+    saved = []
+    for name in _PRESERVE_DIRS:
+        d = os.path.join(full, name)
+        if os.path.isdir(d):
+            tmp = os.path.join(os.path.dirname(full), f".{name}._preserve_{ts}")
+            os.rename(d, tmp)
+            saved.append((tmp, name))
+    return saved
+
+
+def _preserve_restore(full, saved):
+    """Put preserved subdirs back into full, overwriting any pin/clone copy."""
+    for tmp, name in saved:
+        target = os.path.join(full, name)
+        if os.path.exists(target):
+            shutil.rmtree(target)
+        os.rename(tmp, target)
+
+
 def state_fresh(plan):
-    """Move current state_paths aside, recreate empty."""
+    """Move current state_paths aside, recreate empty.
+    Preserved dirs (sci_shared) survive the reset."""
     ts = utc_compact()
     for p in plan["state_paths"]:
         full = os.path.join(BASEDIR, p)
+        saved = _preserve_save(full, ts)
         if os.path.exists(full):
             os.rename(full, f"{full}.deleted-{ts}")
         os.makedirs(full, exist_ok=True)
-        # canonical sub-structure for F/mnt
         if _basename(p) == "mnt":
             os.makedirs(os.path.join(full, "sci_envs"), exist_ok=True)
             os.makedirs(os.path.join(full, "sci_shared"), exist_ok=True)
+        _preserve_restore(full, saved)
 
 
 def state_pin(plan, pin_name):
@@ -427,13 +536,15 @@ def state_pin(plan, pin_name):
 
 
 def state_restore(plan, pin_name):
-    """Replace live state with hardlink-clone of <pin_name>."""
+    """Replace live state with hardlink-clone of <pin_name>.
+    Preserved dirs from live state always win over the pin's copy."""
     src = os.path.join(STATES_DIR, pin_name)
     if not os.path.isdir(src):
         raise SystemExit(f"ERROR: pin '{pin_name}' not found at {src}")
     ts = utc_compact()
     for p in plan["state_paths"]:
         full = os.path.join(BASEDIR, p)
+        saved = _preserve_save(full, ts)
         if os.path.exists(full):
             os.rename(full, f"{full}.deleted-{ts}")
         snap = os.path.join(src, _basename(p))
@@ -441,6 +552,7 @@ def state_restore(plan, pin_name):
             subprocess.run(["cp", "-al", snap, full], check=True)
         else:
             os.makedirs(full, exist_ok=True)
+        _preserve_restore(full, saved)
 
 
 def prepare_state(plan, batch):
@@ -457,7 +569,7 @@ def prepare_state(plan, batch):
 
 # ─── one run ──────────────────────────────────────────────────────────────
 
-def run_one(label, idx, task):
+def run_one(label, idx, task, run_id=None):
     """Launch one SciF run, write minimal meta. Verdict filled by attribute()."""
     t0 = utc_compact()
     launch_s = int(time.time())
@@ -471,7 +583,7 @@ def run_one(label, idx, task):
         proc = subprocess.run(["bash", "-c", cmd], stdout=fo, stderr=fe, cwd=BASEDIR)
     wall = int(time.time() - start)
 
-    json.dump({
+    meta_dict = {
         "label":              label,
         "idx":                idx,
         "task":               task,
@@ -483,7 +595,10 @@ def run_one(label, idx, task):
         "cam_log":            "(pending_reassign)",
         "stdout_log":         os.path.relpath(out, BASEDIR),
         "stderr_log":         os.path.relpath(err, BASEDIR),
-    }, open(meta, "w"), indent=2)
+    }
+    if run_id is not None:
+        meta_dict["run_id"] = run_id
+    json.dump(meta_dict, open(meta, "w"), indent=2)
 
     print(f"[run]   {label} #{idx} done rc={proc.returncode} wall={wall}s", flush=True)
     return meta
@@ -545,10 +660,10 @@ def _task_skip_reason(task):
     return None
 
 
-def launch_batch(batch):
+def launch_batch(batch, run_id=None):
     """Run N copies (parallel or sequential, with stagger between launches).
     Skip the batch if the task requires hardware (GPU/SLURM) not available
-    on this host."""
+    on this host. Returns True if runs were launched, False if skipped."""
     label    = batch["name"]
     n        = int(batch.get("n", 1))
     parallel = int(batch.get("parallel", 1))
@@ -556,21 +671,22 @@ def launch_batch(batch):
     skip = _task_skip_reason(task)
     if skip:
         print(f"[batch] {label}: SKIP — {skip}")
-        return
+        return False
     print(f"[batch] {label}: launching n={n} parallel={parallel} task={task}")
 
     if parallel <= 1:
         for i in range(1, n + 1):
-            run_one(label, i, task)
-        return
+            run_one(label, i, task, run_id=run_id)
+        return True
 
     pids = []  # list of submitted Future objects
     with ThreadPoolExecutor(max_workers=parallel) as ex:
         for i in range(1, n + 1):
-            pids.append(ex.submit(run_one, label, i, task))
+            pids.append(ex.submit(run_one, label, i, task, run_id=run_id))
             time.sleep(STAGGER_S)
         for p in as_completed(pids):
             p.result()
+    return True
 
 
 # ─── orchestrator ─────────────────────────────────────────────────────────
@@ -620,6 +736,59 @@ def validate_plan(plan):
         b.setdefault("parallel", 1)
 
 
+def _check_orphaned_backups():
+    """Detect orphaned .bench-backup-* files from a prior SIGKILL'd bench run.
+
+    If found, warn the user and offer to restore them before proceeding.
+    """
+    targets = [
+        os.path.join(BASEDIR, "ENV.sh"),
+        os.path.join(BASEDIR, "Pam", "gateway.rank.yaml"),
+    ]
+    orphans = {}  # original_path → list of backup paths
+    for orig in targets:
+        parent = os.path.dirname(orig)
+        base = os.path.basename(orig)
+        if not os.path.isdir(parent):
+            continue
+        for f in sorted(os.listdir(parent)):
+            if f.startswith(f"{base}.bench-backup-"):
+                bak = os.path.join(parent, f)
+                orphans.setdefault(orig, []).append(bak)
+
+    if not orphans:
+        return
+
+    print("=" * 60)
+    print("WARNING: Orphaned bench-backup files detected!")
+    print("A previous bench run may have been killed before it could")
+    print("restore the original files.")
+    print()
+    for orig, baks in orphans.items():
+        rel = os.path.relpath(orig, BASEDIR)
+        for bak in baks:
+            print(f"  {os.path.basename(bak)}  →  {rel}")
+    print()
+    try:
+        ans = input("Restore the most recent backup for each file? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = "n"
+        print()
+    if ans == "y":
+        for orig, baks in orphans.items():
+            latest = baks[-1]  # sorted alphabetically, latest timestamp last
+            shutil.move(latest, orig)
+            print(f"[restore] {os.path.relpath(orig, BASEDIR)}  ←  {os.path.basename(latest)}")
+            # Clean up remaining older backups
+            for bak in baks[:-1]:
+                os.remove(bak)
+                print(f"[cleanup] removed older backup: {os.path.basename(bak)}")
+        print()
+    else:
+        print("Skipping restore. Backups left in place.")
+        print("=" * 60)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Run a bench plan end-to-end.")
     ap.add_argument("plan", help="path to JSON plan")
@@ -628,6 +797,9 @@ def main():
     ap.add_argument("--probe-between", action="store_true",
                     help="run a lightweight TPS probe after each batch and record the deltas vs initial probe")
     args = ap.parse_args()
+
+    # Bug 5: detect orphaned backups from a SIGKILL'd previous run
+    _check_orphaned_backups()
 
     plan = json.load(open(args.plan))
     validate_plan(plan)
@@ -653,6 +825,10 @@ def main():
     # ENV.sh may be modified by multiple knobs. Share one backup so a second
     # override doesn't shadow the first.
     env_bak = None
+    if "lock_model" in plan:
+        env_bak = set_env_knob("WORKER_MODEL", plan["lock_model"], env_bak) or env_bak
+    if "review_model" in plan:
+        env_bak = set_env_knob("REVIEW_MODEL", plan["review_model"], env_bak) or env_bak
     if "total_wall_s" in plan:
         env_bak = set_total_wall(plan["total_wall_s"], env_bak) or env_bak
     if "max_iterations_work" in plan:
@@ -684,20 +860,25 @@ def main():
             if not probe["passed"]:
                 raise SystemExit(
                     f"[probe] FAILED thresholds: tps={probe['tps_decode']} oh={probe['oh_p50_ms']}ms "
-                    f"ceiling={probe['conc_ceiling']}. Fix the gateway or use --skip-probe.")
+                    f"ceiling={probe.get('conc_ceiling', '?')}. Fix the gateway or use --skip-probe.")
             print("[probe] passed thresholds.")
 
         # 2. Batches
+        run_id = utc_compact()
+        print(f"    run_id: {run_id}", flush=True)
         batch_results = []
         inter_probes  = []  # one entry per batch boundary (post-batch)
         baseline_tps  = probe.get("tps_decode") if isinstance(probe, dict) else None
         for batch in plan["batches"]:
             prepare_state(plan, batch)
-            launch_batch(batch)
+            launched = launch_batch(batch, run_id=run_id)
+            if not launched:
+                print(f"[batch] {batch['name']}: skipped — skipping attribute/summarize")
+                continue
             print(f"[batch] {batch['name']}: attributing cam logs …")
             time.sleep(2)  # tiny grace for kernel flush
-            attribute.attribute(batch["name"], verbose=True)
-            summary = attribute.summarize(batch)
+            attribute.attribute(batch["name"], verbose=True, run_id=run_id)
+            summary = attribute.summarize(batch, run_id=run_id)
             batch_results.append(summary)
             # Early-stop: if this batch declares abort_if_no_pass and produced
             # zero PASSes, skip remaining batches in the plan. Honors the

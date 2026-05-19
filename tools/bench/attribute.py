@@ -143,12 +143,19 @@ def analyze_cam(path):
 
 # ─── pairing ──────────────────────────────────────────────────────────────
 
-def attribute(label, dry_run=False, verbose=True):
-    """Pair every meta for <label> with its cam log; update meta in-place."""
+def attribute(label, dry_run=False, verbose=True, run_id=None):
+    """Pair every meta for <label> with its cam log; update meta in-place.
+
+    If run_id is given, only process metas whose run_id matches — prevents
+    stale metas from prior bench runs contaminating the current run.
+    """
     metas = []
     for p in glob.glob(f"{RUNS_DIR}/{label}_[0-9]*_*.meta.json"):
         try:
-            metas.append((p, json.load(open(p))))
+            m = json.load(open(p))
+            if run_id is not None and m.get("run_id") != run_id:
+                continue
+            metas.append((p, m))
         except Exception:
             pass
     if not metas:
@@ -232,8 +239,11 @@ def _p50(xs):
     return statistics.median(xs) if xs else None
 
 
-def summarize(batch):
+def summarize(batch, run_id=None):
     """Read attributed metas for batch.name and produce the report dict.
+
+    If run_id is given, only process metas whose run_id matches — prevents
+    stale metas from prior bench runs contaminating the summary.
 
     Returns the per-batch entry that goes into the final report.
     """
@@ -241,7 +251,10 @@ def summarize(batch):
     metas = []
     for p in sorted(glob.glob(f"{RUNS_DIR}/{label}_[0-9]*_*.meta.json")):
         try:
-            metas.append(json.load(open(p)))
+            m = json.load(open(p))
+            if run_id is not None and m.get("run_id") != run_id:
+                continue
+            metas.append(m)
         except Exception:
             pass
 

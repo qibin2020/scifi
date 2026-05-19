@@ -1,29 +1,67 @@
-# Gateway model config (LiteLLM)
-#
-# Active models are uncommented. To add a model: uncomment or copy a template,
-# set the api_key env var in .secret.sh, restart gateway.
-#
-# Model names here must match gateway.rank.yaml entries for Pam selection.
-# Multiple deployments with the same model_name = load-balanced group.
-#
-# Backups: gateway.model.yaml.ollama-backup, gateway.model.yaml.venice-backup
-
 model_list:
+  # ── claude-haiku (Bedrock + Anthropic) — disabled, kept for reference ──
+  # - model_name: claude-haiku
+  #   litellm_params:
+  #     model: bedrock/converse/us.anthropic.claude-haiku-4-5-20251001-v1:0
+  #     api_key: os.environ/BEDROCK_API_KEY
+  #     aws_region_name: us-east-2
+  #   model_info:
+  #     priority: 0
+  # - model_name: claude-haiku
+  #   litellm_params:
+  #     model: anthropic/claude-haiku-4-5-20251001
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+  #   model_info:
+  #     priority: 1
 
-  # ══════════════════════════════════════════════════════════════════
-  # ACTIVE — Ollama Cloud (gemma4)
-  # ══════════════════════════════════════════════════════════════════
+  # ── claude-opus (Bedrock + Anthropic) — disabled, kept for reference ──
+  # - model_name: claude-opus
+  #   litellm_params:
+  #     model: bedrock/converse/us.anthropic.claude-opus-4-6-v1
+  #     api_key: os.environ/BEDROCK_API_KEY
+  #     aws_region_name: us-east-2
+  #   model_info:
+  #     priority: 0
+  # - model_name: claude-opus
+  #   litellm_params:
+  #     model: anthropic/claude-opus-4-6
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+  #   model_info:
+  #     priority: 1
 
-  # ── gemma4 (non-thinking) ──
+  # ── gemma4 (Ollama Cloud) — current primary work + control model ──
+  # keep_alive=30m: prevents the 60–280 s cold-reload Ollama Cloud incurs when
+  # the model is GPU-evicted between idle gaps. See
+  # /home/u0/Work/sci-fi-RD/gateway_overhead_study.md §7a.
+  #
+  # For 2-key load balancing (raises the concurrency ceiling, see study §4),
+  # add a second deployment under the same model_name using OLLAMA_API_KEY1
+  # (or any indexed variant — Pam/gateway.sh forwards them automatically).
+  # Not committed: keys are user-specific and the second deployment only
+  # makes sense when both keys are populated in .secret.sh.
   - model_name: gemma4
     litellm_params:
       model: openai/gemma4:31b-cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
       keep_alive: "30m"
+      max_parallel_requests: 6        # workhorse — biggest per-deployment share (4×2 keys = 8 in-flight cap when alone).
+                                      # Per-key sharing math (see gateway_workload_obs.md): keep sum-of-caps ≤14 per key,
+                                      # under Ollama's ~16 per-account concurrency cap. semaphore: queues transparently
+                                      # via asyncio.Semaphore in router.py:2164; no 429 reaches caller.
+  - model_name: gemma4                # 2nd deployment on a 2nd Ollama account; least-busy spreads load.
+    litellm_params:
+      model: openai/gemma4:31b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
       max_parallel_requests: 6
 
-  # ── gemma4-thinking (native think:true via /api/chat) ──
+  # ── gemma4-thinking (Ollama Cloud) — same model, native /api/chat with think:true ──
+  # gemma4 thinking is binary (no low/medium/high — reasoning_effort is ignored).
+  # We use ollama_chat/ provider prefix to route through Ollama's native /api/chat
+  # endpoint, which honours `think:true` (the OpenAI-compat /v1 endpoint strips it).
+  # Dual-key, same per-deployment cap as the non-thinking gemma4 alias.
   - model_name: gemma4-thinking
     litellm_params:
       model: ollama_chat/gemma4:31b-cloud
@@ -33,8 +71,169 @@ model_list:
       max_parallel_requests: 6
       extra_body:
         think: true
+  - model_name: gemma4-thinking
+    litellm_params:
+      model: ollama_chat/gemma4:31b-cloud
+      api_base: https://ollama.com
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        think: true
 
-  # ── fallback (same as gemma4, used when rank.yaml exhausted) ──
+  # ── deepseek-v4-flash (Ollama Cloud) — 284B/13B MoE, 1M ctx ──
+  # Ollama exposes 3 thinking modes (no/thinking/max) as runtime reasoning_effort
+  # (low/medium/high), NOT as separate tags. We wrap each level as its own
+  # model_name alias so that A/B tests are a one-line ForceModel: swap in task
+  # .md files — driver, Pam, and task_parser stay unchanged. The Anthropic-style
+  # `thinking={type:enabled, budget_tokens}` path in driver._api_call is left
+  # off (thinkable: false in rank.yaml); reasoning_effort is the openai/-provider
+  # convention LiteLLM forwards verbatim to Ollama Cloud.
+  - model_name: deepseek-v4-flash-off
+    litellm_params:
+      model: openai/deepseek-v4-flash:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "low"
+  - model_name: deepseek-v4-flash-off
+    litellm_params:
+      model: openai/deepseek-v4-flash:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "low"
+  - model_name: deepseek-v4-flash-on
+    litellm_params:
+      model: openai/deepseek-v4-flash:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "medium"
+  - model_name: deepseek-v4-flash-on
+    litellm_params:
+      model: openai/deepseek-v4-flash:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "medium"
+  - model_name: deepseek-v4-flash-max
+    litellm_params:
+      model: openai/deepseek-v4-flash:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "high"
+  - model_name: deepseek-v4-flash-max
+    litellm_params:
+      model: openai/deepseek-v4-flash:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "high"
+
+  # ── deepseek-v4-pro (Ollama Cloud) — 1.6T/49B MoE, 1M ctx ──
+  # Premium open-weight peer to claude-sonnet. Three reasoning aliases like
+  # flash, plus a default-effort alias. -off/-on/-max set reasoning_effort
+  # explicitly; -pro (no suffix) leaves it to the model default.
+  - model_name: deepseek-v4-pro
+    litellm_params:
+      model: openai/deepseek-v4-pro:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+      keep_alive: "30m"
+      max_parallel_requests: 6
+  - model_name: deepseek-v4-pro
+    litellm_params:
+      model: openai/deepseek-v4-pro:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
+      max_parallel_requests: 6
+  - model_name: deepseek-v4-pro-off
+    litellm_params:
+      model: openai/deepseek-v4-pro:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "low"
+  - model_name: deepseek-v4-pro-off
+    litellm_params:
+      model: openai/deepseek-v4-pro:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "low"
+  - model_name: deepseek-v4-pro-on
+    litellm_params:
+      model: openai/deepseek-v4-pro:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "medium"
+  - model_name: deepseek-v4-pro-on
+    litellm_params:
+      model: openai/deepseek-v4-pro:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
+      max_parallel_requests: 6
+      extra_body:
+        reasoning_effort: "medium"
+
+  # ── Other Ollama Cloud models — disabled while gemma4 is the focus ──
+  # Re-enable + add keep_alive: "30m" + a second deployment per model when needed.
+  # - model_name: qwen3-coder
+  #   litellm_params:
+  #     model: openai/qwen3-coder:480b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  # - model_name: deepseek-v3
+  #   litellm_params:
+  #     model: openai/deepseek-v3.2:cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  # - model_name: kimi-k2
+  #   litellm_params:
+  #     model: openai/kimi-k2:1t-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  # - model_name: qwen3-next-80b
+  #   litellm_params:
+  #     model: openai/qwen3-next:80b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  # - model_name: gpt-oss
+  #   litellm_params:
+  #     model: openai/gpt-oss:120b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+
+  # ── fallback (alias) — collapsed to gemma4 only while other models are off.
+  #    Both keys: low cap (1 each) since fallback is rare-path; per-key sum stays under cap.
   - model_name: fallback
     litellm_params:
       model: openai/gemma4:31b-cloud
@@ -42,8 +241,52 @@ model_list:
       api_key: os.environ/OLLAMA_API_KEY
       keep_alive: "30m"
       max_parallel_requests: 6
+    model_info:
+      priority: 0
+  - model_name: fallback
+    litellm_params:
+      model: openai/gemma4:31b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
+      max_parallel_requests: 6
+    model_info:
+      priority: 0
+  # - model_name: fallback
+  #   litellm_params:
+  #     model: openai/qwen3-coder:480b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: fallback
+  #   litellm_params:
+  #     model: openai/deepseek-v3.2:cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: fallback
+  #   litellm_params:
+  #     model: openai/kimi-k2:1t-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: fallback
+  #   litellm_params:
+  #     model: openai/qwen3-next:80b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
 
-  # ── ui (SciFi CLI interface) ──
+  # ── ui (alias for SciFi) — collapsed to gemma4 only.
+  #    Both keys: low cap (1 each) since UI traffic is interactive/sparse.
   - model_name: ui
     litellm_params:
       model: openai/gemma4:31b-cloud
@@ -51,84 +294,63 @@ model_list:
       api_key: os.environ/OLLAMA_API_KEY
       keep_alive: "30m"
       max_parallel_requests: 6
-
-  # ══════════════════════════════════════════════════════════════════
-  # OPTIONAL — uncomment to enable. Set api_key in .secret.sh first.
-  # ══════════════════════════════════════════════════════════════════
-
-  # ── Ollama Cloud: 2nd key for load balancing ──
-  # - model_name: gemma4
+    model_info:
+      priority: 0
+  - model_name: ui
+    litellm_params:
+      model: openai/gemma4:31b-cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY1
+      keep_alive: "30m"
+      max_parallel_requests: 6
+    model_info:
+      priority: 0
+  # - model_name: ui
   #   litellm_params:
-  #     model: openai/gemma4:31b-cloud
-  #     api_base: https://ollama.com/v1
-  #     api_key: os.environ/OLLAMA_API_KEY1
-  #     keep_alive: "30m"
-  #     max_parallel_requests: 6
-  # - model_name: gemma4-thinking
-  #   litellm_params:
-  #     model: ollama_chat/gemma4:31b-cloud
-  #     api_base: https://ollama.com
-  #     api_key: os.environ/OLLAMA_API_KEY1
-  #     keep_alive: "30m"
-  #     max_parallel_requests: 6
-  #     extra_body:
-  #       think: true
-
-  # ── Ollama Cloud: deepseek-v4 ──
-  # - model_name: deepseek-v4-pro
-  #   litellm_params:
-  #     model: openai/deepseek-v4-pro:cloud
+  #     model: openai/qwen3-coder:480b-cloud
   #     api_base: https://ollama.com/v1
   #     api_key: os.environ/OLLAMA_API_KEY
   #     keep_alive: "30m"
-  #     max_parallel_requests: 6
-  # - model_name: deepseek-v4-flash-off
+  #   model_info:
+  #     priority: 1
+  # - model_name: ui
   #   litellm_params:
-  #     model: openai/deepseek-v4-flash:cloud
+  #     model: openai/deepseek-v3.2:cloud
   #     api_base: https://ollama.com/v1
   #     api_key: os.environ/OLLAMA_API_KEY
   #     keep_alive: "30m"
-  #     max_parallel_requests: 6
-  #     extra_body:
-  #       reasoning_effort: "low"
+  #   model_info:
+  #     priority: 1
+  # - model_name: ui
+  #   litellm_params:
+  #     model: openai/kimi-k2:1t-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: ui
+  #   litellm_params:
+  #     model: openai/qwen3-next:80b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
+  # - model_name: ui
+  #   litellm_params:
+  #     model: openai/gpt-oss:120b-cloud
+  #     api_base: https://ollama.com/v1
+  #     api_key: os.environ/OLLAMA_API_KEY
+  #     keep_alive: "30m"
+  #   model_info:
+  #     priority: 1
 
-  # ── Venice.ai: gemma4 ──
-  # - model_name: gemma4
-  #   litellm_params:
-  #     model: openai/google-gemma-4-31b-it
-  #     api_base: https://api.venice.ai/api/v1
-  #     api_key: os.environ/VENICE_API_KEY
-  #     max_parallel_requests: 6
-  #     extra_body:
-  #       venice_parameters:
-  #         disable_thinking: true
-  # - model_name: gemma4-thinking
-  #   litellm_params:
-  #     model: openai/google-gemma-4-31b-it
-  #     api_base: https://api.venice.ai/api/v1
-  #     api_key: os.environ/VENICE_API_KEY
-  #     max_parallel_requests: 6
-  #     extra_body:
-  #       venice_parameters:
-  #         disable_thinking: false
-
-  # ── Venice.ai: deepseek-v4-pro ──
-  # - model_name: deepseek-v4-pro
-  #   litellm_params:
-  #     model: openai/deepseek-v4-pro
-  #     api_base: https://api.venice.ai/api/v1
-  #     api_key: os.environ/VENICE_API_KEY
-  #     max_parallel_requests: 6
-
-  # ── Anthropic: claude ──
-  # - model_name: claude-haiku
-  #   litellm_params:
-  #     model: anthropic/claude-haiku-4-5-20251001
-  #     api_key: os.environ/ANTHROPIC_API_KEY
-  # - model_name: claude-opus
-  #   litellm_params:
-  #     model: anthropic/claude-opus-4-6
-  #     api_key: os.environ/ANTHROPIC_API_KEY
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Provider examples — one model per provider, showing the call format.
+  # Uncomment and adjust model_name to integrate.
+  # See: https://docs.litellm.ai/docs/providers
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   # ── OpenAI ──
   # - model_name: gpt-4o
@@ -142,6 +364,49 @@ model_list:
   #     model: gemini/gemini-2.5-flash-preview-05-20
   #     api_key: os.environ/GEMINI_API_KEY
 
+  # ── Mistral ──
+  # - model_name: mistral-large
+  #   litellm_params:
+  #     model: mistral/mistral-large-latest
+  #     api_key: os.environ/MISTRAL_API_KEY
+
+  # ── DeepSeek (direct API) ──
+  # - model_name: deepseek-chat
+  #   litellm_params:
+  #     model: deepseek/deepseek-chat
+  #     api_key: os.environ/DEEPSEEK_API_KEY
+
+  # ── Groq ──
+  # - model_name: llama-70b-groq
+  #   litellm_params:
+  #     model: groq/llama-3.3-70b-versatile
+  #     api_key: os.environ/GROQ_API_KEY
+
+  # ── Together AI ──
+  # - model_name: qwen-72b-together
+  #   litellm_params:
+  #     model: together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo
+  #     api_key: os.environ/TOGETHERAI_API_KEY
+
+  # ── Fireworks AI ──
+  # - model_name: qwen-72b-fireworks
+  #   litellm_params:
+  #     model: fireworks_ai/accounts/fireworks/models/qwen2p5-72b-instruct
+  #     api_key: os.environ/FIREWORKS_AI_API_KEY
+
+  # ── OpenRouter ──
+  # - model_name: claude-sonnet-or
+  #   litellm_params:
+  #     model: openrouter/anthropic/claude-sonnet-4
+  #     api_key: os.environ/OPENROUTER_API_KEY
+
+  # ── Azure OpenAI ──
+  # - model_name: gpt-4o-azure
+  #   litellm_params:
+  #     model: azure/gpt-4o-deployment-name
+  #     api_key: os.environ/AZURE_API_KEY
+  #     api_base: os.environ/AZURE_API_BASE
+
   # ── Local Ollama (self-hosted) ──
   # - model_name: local-llama
   #   litellm_params:
@@ -154,11 +419,18 @@ general_settings:
   health_check_interval: 300
 
 router_settings:
-  routing_strategy: least-busy
-  num_retries: 20
-  retry_after: 1
-  allowed_fails: 5
-  cooldown_time: 5
+  # Tuned per /home/u0/Work/sci-fi-RD/gateway_overhead_study.md §8.
+  # Ollama Cloud rate-limits by *concurrency*, not RPM — its 429 returns when
+  # the deployment is healthy and the slot frees in milliseconds, not 30 s.
+  # The LiteLLM defaults (allowed_fails: 2 / cooldown_time: 30) misinterpret
+  # those 429s as deployment failure and bench a healthy peer for 30 s of
+  # wall-clock time, then num_retries cannot rescue and the client sees 5xx.
+  # Goal: minimize LLM time in total wall — short cooldown, retry rolls forward.
+  routing_strategy: least-busy   # route to fewest-in-flight deployment (no Redis); harmless with 1 deployment, helpful with N
+  num_retries: 20                # plenty — observed never tapped during real workload (canary always retries=0). Lower is easier to reason about; raise back to 60 if a saturation incident exhausts it.
+  retry_after: 1                 # Ollama concurrency-429 slot clears in ms
+  allowed_fails: 5               # only cooldown after 5 *consecutive* fails — real outage signal, not a transient burst
+  cooldown_time: 5               # short circuit-breaker, not a wall-clock penalty
   enable_pre_call_checks: true
   retry_policy:
     RateLimitError: 5
@@ -166,4 +438,4 @@ router_settings:
 
 litellm_settings:
   modify_params: true
-  request_timeout: 300
+  request_timeout: 300           # backstop on pathological queue depth — caller never blocks > 5 min per call

@@ -899,20 +899,36 @@ and decide: is the task done, or does it need another attempt?
 
 PATH A — VERIFY (worker may have succeeded)
   If the transcript shows the verification passing, or the worker claims
-  done, verify the Expect criteria yourself with your tools. Re-run any
-  verification command — live output is ground truth, files on disk are not.
-  The worker's env is already active. Do NOT rebuild anything.
+  done, verify the Expect criteria yourself with your tools. Re-run EVERY
+  verification command listed in the Expect section — not just one. Live
+  output is ground truth, files on disk are not. The worker's env is
+  already active. Do NOT rebuild anything.
   Call `verdict` with passed=true/false based on YOUR observations.
+  IMPORTANT: Check ALL expected conditions. If the task requires multiple
+  test modes, run ALL of them. A partial pass is a fail.
 
 PATH B — GUIDE (worker failed or ran out of iterations)
-  Produce specific guidance for the next worker via `decision`.
-  Focus on ONE bug at a time. If the worker is stuck on multiple issues,
-  pick the most blocking one. The next retry handles the next issue.
-  - dos: every actionable conclusion from your analysis must appear here.
-    If you identified a fix, dos must state it concretely.
-  - donts: approaches already tried that failed, plus any violations of
-    task constraints (fabrication, modifying forbidden files, etc.)
-  - hint: key technical insight (quote values, name patterns)
+  The next worker starts FRESH with no memory of this attempt. Your
+  feedback is the ONLY bridge. Be brutally concrete.
+
+  Before calling `decision`, extract from the transcript:
+
+  1. FAILING CODE — quote the exact code snippet or command that caused
+     the failure. Use the worker's own writes/tool calls.
+  2. EVIDENCE — quote the exact error message or wrong output from tool
+     results. Include the command and its output.
+  3. FIX — state what specifically must change. Name the file, the line,
+     and the concrete correction.
+
+  Pack all three into the decision fields:
+  - dos: the concrete fix. MUST reference specific files and state exactly
+    what to write or change. Not "fix the ordering" but "in file.v, change
+    `a <= {b, c}` to `a <= {c, b}`".
+  - donts: approaches already tried that failed — quote the attempt so
+    the worker recognizes it. Be specific.
+  - hint: root-cause diagnosis with quoted evidence from tool output.
+
+  Focus on ONE bug at a time. Pick the most blocking one.
 
 Read the transcript first, then choose Path A or B."""
 
@@ -1100,9 +1116,9 @@ REVIEW_TOOLS = [
             "enable_thinking": {"type": "boolean", "description": "Enable thinking mode if model supports it."},
             "thinking_budget": {"type": "integer", "description": "Thinking token budget (e.g. 5000, 10000). Only if enable_thinking=true."},
             "reason": {"type": "string"},
-            "dos": {"type": "string", "description": "Specific actions the next worker SHOULD do."},
-            "donts": {"type": "string", "description": "Approaches already tried that failed — next worker should AVOID these."},
-            "hint": {"type": "string", "description": "Key technical insight extracted from the verification output."},
+            "dos": {"type": "string", "description": "Concrete fix: MUST name file, line/function, and what to change. Quote failing code and state what replaces it."},
+            "donts": {"type": "string", "description": "Approaches already tried that failed — quote the attempt and error so the fresh worker recognizes them."},
+            "hint": {"type": "string", "description": "Root-cause diagnosis with quoted evidence from tool output (error messages, wrong values). Mechanistic, not vague."},
             "worker_on_track": {"type": "boolean", "description": "True if worker was heading right direction but ran out of iterations."}},
             "required": ["action", "reason"]}}},
 ]
@@ -2493,7 +2509,11 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
 
     scheduler = Scheduler(node, plan)
 
-    # Build initial context: structured sections → skills → global → memory
+    # Build initial context: task → feedback → skill → memory.
+    # Task spec leads. Review feedback immediately after (most actionable).
+    # Skill and memory are support context.
+
+    # 1. Task spec (FIRST — the job)
     if parsed:
         agent_meta = public_meta(parsed["meta"])
         meta_block = "\n".join(f"{k}: {v}" for k, v in agent_meta.items())
@@ -2506,29 +2526,42 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             sections.append(f"## Context\n{parsed['context']}")
         sections.append(f"## Todo\n{parsed['todo']}")
         sections.append(f"## Expect\n{parsed['expect']}")
-        user_msg = "\n\n".join(sections)[:CAP_TASK]
+        user_msg = "\n\n".join(sections)
     else:
-        user_msg = task_content[:CAP_TASK]
+        user_msg = task_content
+
+    # 2. Review feedback — right after task spec, before skill boilerplate.
+    # Latest attempt only (most refined).
+    feedback_raw = _read_feedback(task_dir, task_file)
+    if feedback_raw:
+        last_attempt = feedback_raw
+        last_header = feedback_raw.rfind("\n## Attempt ")
+        if last_header >= 0:
+            last_attempt = feedback_raw[last_header:]
+        user_msg += (
+            f"\n\n---\n[REVIEW FEEDBACK — MOST IMPORTANT]\n"
+            f"An independent reviewer analyzed your PREVIOUS failed attempt. "
+            f"The DO field contains the exact fix (file, location, code). "
+            f"The EVIDENCE field quotes the actual error. "
+            f"Apply the fix FIRST, then verify.\n"
+            f"{last_attempt}")
+
+    # 3. Skill context + global memory (tool instructions, general)
     if skill_context:
         user_msg += "\n\n" + "\n".join(skill_context)
     if context:
         user_msg += f"\n\n{context[:CAP_GLOBAL]}"
     if global_memory:
-        user_msg += f"\n\n---\nGlobal Experience (truncated, use read_file for full):\n{global_memory[:CAP_GLOBAL]}"
+        user_msg += (f"\n\n---\nGlobal Experience (truncated, use read_file for full):\n"
+                     f"{global_memory[:CAP_GLOBAL]}")
+
+    # 4. Task-related memory (history, what was tried)
     if memory:
-        user_msg += f"\n\n---\nPersistent Memory (truncated, use memory_read for full):\n{memory[:CAP_MEMORY]}"
+        user_msg += (f"\n\n---\nPersistent Memory (truncated, use memory_read for full):\n"
+                     f"{memory[:CAP_MEMORY]}")
     if taskgroup_memory:
         user_msg += (f"\n\n---\nTaskGroup Experience ({task_group}) — "
                      f"cross-task domain memory:\n{taskgroup_memory[:CAP_TASKGROUP]}")
-
-    # Review feedback from prior attempts. Appended at bottom — the worker
-    # reads the task spec first, then sees what prior attempts tried.
-    feedback = _read_feedback(task_dir, task_file)
-    if feedback:
-        user_msg += (
-            f"\n\n---\n[REVIEW FEEDBACK FROM PRIOR ATTEMPTS]\n"
-            f"Read carefully — do not repeat the same mistakes.\n\n"
-            f"{feedback[:CAP_MEMORY]}")
 
     # Detect whether the worker model is a thinking model (affects iter cap + prompt).
     worker_is_thinking = node.thinking or pam.is_thinkable(model)
@@ -2664,8 +2697,10 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
             total_iter=total_iter,
             avg_iter_s=f"{(time.time()-wall_start)/total_iter:.1f}" if total_iter > 1 else "n/a")
 
-        # Recap (based on effective iterations)
-        if effective_iter > 0 and effective_iter % RECAP_EVERY == 0:
+        # Recap: only for thinking workers. Nonthink models treat recaps as
+        # a "start over" signal, triggering wasteful full-file rewrites instead
+        # of incremental debugging (confirmed via replay A/B test).
+        if worker_is_thinking and effective_iter > 0 and effective_iter % RECAP_EVERY == 0:
             memory = _read_memory(task_dir)
             messages.append({"role": "user",
                 "content": _recap_msg(task_content, memory, effective_iter+1, max_iter,
@@ -2917,7 +2952,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         reason = rv.get('reason', '')
         feedback_parts = [
             f"LOOP-EXHAUSTED RETRY (recovery {node._recovery_count}/{MAX_RETRIES_EXHAUSTED})",
-            f"Reason: {reason}",
+            f"Diagnosis: {reason}",
         ]
         if rv.get("dos"):
             feedback_parts.append(f"DO: {rv['dos']}")
@@ -2926,15 +2961,14 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         if rv.get("donts"):
             feedback_parts.append(f"DON'T: {rv['donts']}")
         if rv.get("hint"):
-            feedback_parts.append(f"HINT: {rv['hint']}")
+            feedback_parts.append(f"EVIDENCE: {rv['hint']}")
         else:
-            feedback_parts.append(f"HINT: {reason}")
+            feedback_parts.append(f"EVIDENCE: {reason}")
         if rv.get("worker_on_track"):
             feedback_parts.append("DIRECTION: Continue current approach — worker was on track.")
         else:
             feedback_parts.append("DIRECTION: Try a different approach.")
-            feedback_parts.append(f"KEY ISSUE (repeated): {reason}")
-            feedback_parts.append(f"KEY ISSUE (repeated): {reason}")
+            feedback_parts.append(f"ROOT CAUSE: {reason}")
         _append_feedback(task_dir, task_file, "\n".join(feedback_parts))
         # Model selection: escalate rank OR exclude current, not both.
         # Sticky force_model from task metadata overrides everything — if the
@@ -3070,6 +3104,12 @@ def run_sam(task_dir, task_file="top.md", depth=0):
             _ts = ", ".join(f"{t:.1f}" for t in _llm_times)
             print(f"LLM/iter: [{_ts}] avg={_avg:.1f}s (trend: {_trend})")
 
+        success = not result.startswith(("MAX_ITERATIONS_WORK", "UNVERIFIED"))
+        _history(task_dir, "TASK_RESULT", depth,
+            verdict="PASS" if success else "FAIL",
+            result=result[:500],
+            wall_s=round(_sam_wall, 1),
+            model=root.model, rank=root.rank)
         return result, root.rank, root.model, cm, plan.get("no_memory", False), plan.get("task_group")
     finally:
         _restore_system_env(saved_env)
