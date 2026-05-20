@@ -35,7 +35,19 @@ _test_env = {
     "GATEWAY_PORT": "12345",
     "FALLBACK_HIGHEST": "test-model",
     "FALLBACK_WORKING": "test-worker",
+    "MAX_ITERATIONS_WORK": "50",
+    "MAX_ITERATIONS_REVIEW_DONE": "50",
+    "MAX_ITERATIONS_REVIEW_FAIL": "10",
+    "MAX_ITERATIONS_REFLECT": "15",
+    "MAX_RETRIES_REJECTED": "3",
+    "MAX_RETRIES_EXHAUSTED": "3",
+    "CHECKPOINT_EVERY": "5",
+    "MAX_CONTEXT": "80",
+    "MAX_DEPTH": "5",
+    "MAX_PARALLEL_AGENTS": "4",
+    "MAX_BASH_TIME": "300",
     "TOTAL_WALL_PER_RANK": "1800,1800,1800,1800,1800,1800",
+    "MAX_EVOLVE_ITER": "20",
     "CAM_DIR": os.path.join(_test_tmpdir, "Cam"),
     "TMPDIR": _test_tmpdir,
     "NERSC_ACCOUNT": "m2616",
@@ -148,6 +160,7 @@ class TestEvolutionProfile(unittest.TestCase):
         cmd_str = " ".join(cmd)
         self.assertIn("/srv/evolution.py", cmd_str)
         self.assertIn("/srv/task_parser.py", cmd_str)
+        self.assertIn("MAX_EVOLVE_ITER=20", cmd_str)
 
     def test_no_gpu(self):
         cmd = portal.build_evolution_cmd(["suggest"])

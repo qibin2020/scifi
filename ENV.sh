@@ -119,41 +119,41 @@ export SCIFI_MODEL=ui
 ## One of: common_env | local_env | temp_env
 export DEFAULT_ENV_SKILL=temp_env
 
-## Driver — tuning knobs (all have defaults in driver.py; uncomment to override)
+## Driver — tuning knobs (all optional; defaults in driver.py apply if unset)
 ##
-## Iter caps: worker auto-selects think/nonthink cap via pam.is_thinkable().
-## Review uses same cap for both done/fail cases.
-# export MAX_ITERATIONS_WORK=25          # nonthink worker iters per SAM
-# export MAX_ITERATIONS_WORK_THINK=25    # think worker iters per SAM
-# export MAX_ITERATIONS_REVIEW_DONE=30   # review iters (done case)
-# export MAX_ITERATIONS_REVIEW_FAIL=30   # review iters (fail case)
-# export MAX_ITERATIONS_REFLECT=10       # reflect (diagnostic) iters
-# export MAX_RETRIES_REJECTED=3          # done-claim rejections before reflect
-# export MAX_RETRIES_EXHAUSTED=20        # retry rounds (each spawns fresh SAM)
-# export RECAP_EVERY=5                   # re-inject task spec every N iters
-# export MAX_CONTEXT=80                  # max messages before oldest trimmed
-# export MAX_DEPTH=5                     # max subtask nesting
-# export MAX_PARALLEL_AGENTS=4           # concurrent subtask cap
-# export MAX_BASH_TIME=300               # per-bash-call timeout (sec)
-# export TOTAL_WALL_PER_RANK=600,1800,3600,9000,21600,43200  # rank 0=10m, 1=30m, 2=1h, 3=2.5h, 4=6h, 5=12h
+## Uncomment any line to override the driver's built-in default.
+## The value shown in the comment IS the default — what driver.py uses
+## when the variable is absent from the environment.
 ##
-## Model override (all fallback to pam if unset; task ForceModel/ControlModel take priority)
-## When set, bypasses pam rank selection and forces the named model for ALL tasks.
-export WORKER_MODEL=gemma4             # force worker model (default: pam.select(rank))
-export REVIEW_MODEL=gemma4-thinking      # force review model (default: pam.highest())
+## Iteration caps (per agent type, per SAM attempt):
+# export MAX_ITERATIONS_WORK=50           # worker iters per SAM (default: 50)
+# export MAX_ITERATIONS_REVIEW_DONE=50    # reviewer iters, done case (default: 50)
+# export MAX_ITERATIONS_REVIEW_FAIL=10    # reviewer iters, fail case (default: 10)
+# export MAX_ITERATIONS_REFLECT=15        # reflect/diagnostic agent iters (default: 15)
 ##
-## Prescan
-# export PRESCAN_MODE=metadata           # metadata (default) | llm
-# export DEFAULT_RANK=3                  # rank when task has no Rank: field (0=trivial .. N=hard)
-# export PRESCAN_MODEL=gemma4            # force prescan model when PRESCAN_MODE is llm (default: pam.highest())
+## Retry caps (how many fresh SAM attempts before giving up):
+# export MAX_RETRIES_REJECTED=3           # done-claim rejections before reflect (default: 3)
+# export MAX_RETRIES_EXHAUSTED=3          # LOOP_EXHAUSTED retries, each spawns new SAM (default: 3)
 ##
-## Robustness (raise to tolerate flaky providers)
-# export ERROR_LIMIT=5                   # API errors before model blacklist
-# export NUDGE_LIMIT=5                   # no-tool turns before blacklist
-# export TOOL_RESULT_CAP=10000           # tool output truncation (chars)
-
-## Evolution
-# export MAX_EVOLVE_ITER=20             # max evolution iterations
+## Context management:
+# export CHECKPOINT_EVERY=5               # re-inject task+memory every N iters (default: 5)
+# export MAX_CONTEXT=80                   # max LLM messages before oldest trimmed (default: 80)
+##
+## Scheduling / resources:
+# export MAX_DEPTH=5                      # max subtask nesting depth (default: 5)
+# export MAX_PARALLEL_AGENTS=4            # concurrent subtask cap (default: 4)
+# export MAX_BASH_TIME=300                # per-bash-call timeout in seconds (default: 300)
+##
+## Wall-clock limit per rank (comma-separated, one value per rank 0..N):
+export TOTAL_WALL_PER_RANK=2700,2700,2700,2700,2700,2700   # uniform 45 min safety cap
+##
+## Robustness (raise to tolerate flaky providers):
+# export ERROR_LIMIT=5                    # consecutive API errors → blacklist model (default: 5)
+# export NUDGE_LIMIT=5                    # consecutive no-tool turns → blacklist (default: 5)
+# export TOOL_RESULT_CAP=10000            # tool output truncation in chars (default: 10000)
+##
+## Evolution:
+# export MAX_EVOLVE_ITER=20               # max evolution iterations (default: 20)
 
 ## Cam (write-only audit recording)
 export CAM_DIR="$BASEDIR/Cam"
