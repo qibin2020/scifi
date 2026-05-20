@@ -469,6 +469,8 @@ def build_driver_cmd(task_name, extra_args):
             "ERROR_LIMIT":                _env_opt("ERROR_LIMIT"),
             "NUDGE_LIMIT":                _env_opt("NUDGE_LIMIT"),
             "TOOL_RESULT_CAP":            _env_opt("TOOL_RESULT_CAP"),
+            "WORKER_MODEL":               _env_opt("WORKER_MODEL"),
+            "REVIEW_MODEL":               _env_opt("REVIEW_MODEL"),
         }.items() if v},
         "SKILLS_DIR": "/srv/skills",
         "EFFECTIVE_COMMON_STORAGE": common_storage,

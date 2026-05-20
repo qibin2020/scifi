@@ -147,6 +147,11 @@ export DEFAULT_ENV_SKILL=temp_env
 ## Wall-clock limit per rank (comma-separated, one value per rank 0..N):
 export TOTAL_WALL_PER_RANK=2700,2700,2700,2700,2700,2700   # uniform 45 min safety cap
 ##
+## Model override (optional; task ForceModel/ControlModel take priority):
+## When set, bypasses pam rank selection. Unset = pam.select(rank) / pam.highest().
+export WORKER_MODEL=gemma4-thinking    # worker model (bench 2026-05-19: think both = fastest)
+export REVIEW_MODEL=gemma4-thinking    # review model (think review catches bugs faster)
+##
 ## Robustness (raise to tolerate flaky providers):
 # export ERROR_LIMIT=5                    # consecutive API errors → blacklist model (default: 5)
 # export NUDGE_LIMIT=5                    # consecutive no-tool turns → blacklist (default: 5)

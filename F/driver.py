@@ -65,6 +65,10 @@ MAX_CONTEXT = int(os.environ.get("MAX_CONTEXT", "80"))
 MAX_DEPTH = int(os.environ.get("MAX_DEPTH", "5"))
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL_AGENTS", "4"))
 MAX_BASH_TIME = int(os.environ.get("MAX_BASH_TIME", "300"))  # max seconds per bash call
+# Model overrides (optional). When set, bypass pam selection for worker/review.
+# Task-level ForceModel/ControlModel still take priority over these.
+WORKER_MODEL = os.environ.get("WORKER_MODEL", "")
+REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "")
 
 # Per-rank TOTAL wall limit (including bash/tool time). 0 = disabled.
 # Safety net only — bash is already capped separately. Rank is otherwise
@@ -115,8 +119,10 @@ def _resolve_control_model(control_model):
     Accepts a model name (e.g. 'deepseek-v3') or a rank number (e.g. '2').
     If rank: pick highest available model at-or-below that rank.
     If name: use that exact model.
-    If None: returns pam.highest() (default behavior)."""
+    If None: falls back to REVIEW_MODEL env, then pam.highest()."""
     if not control_model:
+        if REVIEW_MODEL:
+            return pam.select(0, usage=_usage, force_model=REVIEW_MODEL)["name"]
         return pam.highest(usage=_usage)
     # Check if it's a rank number
     try:
@@ -2893,7 +2899,7 @@ def run_sam(task_dir, task_file="top.md", depth=0):
     plan = prescan(content, task_dir, memory, global_memory, task_file)
     fm = plan.get("force_model")
     cm = plan.get("control_model")
-    model = pam.select(plan["rank"], usage=_usage, force_model=fm)["name"]
+    model = pam.select(plan["rank"], usage=_usage, force_model=fm or WORKER_MODEL or None)["name"]
 
     root = AgentNode(
         agent_id=os.path.basename(task_dir),
