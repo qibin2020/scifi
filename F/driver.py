@@ -134,6 +134,25 @@ def _resolve_control_model(control_model):
     return pam.select(0, usage=_usage, force_model=control_model)["name"]
 
 
+def _resolve_worker_model(rank, force_model=None, exclude=None):
+    """Resolve a worker model name — the single funnel for ALL worker selection
+    (top-level, subtask dispatch, subtask rank re-select, retry/recovery).
+    Mirror of _resolve_control_model on the worker axis.
+
+    Priority: task ForceModel (force_model arg) > WORKER_MODEL env > pam.select(rank).
+    A pin (ForceModel or WORKER_MODEL) bypasses BOTH rank and exclude — so it also
+    disables retry model-rotation, which is the intended behaviour for a bench
+    combo pin (freeze the worker model for the whole run). `exclude` only takes
+    effect on the unpinned pam path, where it rotates off a model that did poorly.
+
+    Every worker-spawn site must go through here; never call pam.select for a
+    worker model directly, or the WORKER_MODEL pin silently leaks (see review-
+    side recovery paths _review_fallback / lateral rotation, which intentionally
+    deviate from the REVIEW_MODEL pin and are the only sanctioned exceptions)."""
+    fm = force_model or WORKER_MODEL or None
+    return pam.select(rank, exclude=exclude, usage=_usage, force_model=fm)["name"]
+
+
 # ============================================================
 # SKILLS (loaded once at startup)
 # ============================================================
@@ -1903,7 +1922,8 @@ def _execute_tool(name, args, task_dir, node, scheduler):
                 # yaml-order selection (no shuffle) — deterministic first pick.
                 # Retry rotation happens via exclude_model in the recovery path.
                 # The subtask's own prescan will override via force_model if set.
-                model = pam.select(r, usage=_usage)["name"]
+                # Funnel applies the WORKER_MODEL pin to subtasks too.
+                model = _resolve_worker_model(r)
                 ctx = scheduler.plan.get("context", {}).get(tf, "")
             else:
                 r = node.rank
@@ -2386,7 +2406,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
           and plan.get("rank") is not None
           and int(plan["rank"]) != node.rank):
         node.rank = int(plan["rank"])
-        new_model = pam.select(node.rank, usage=_usage)["name"]
+        new_model = _resolve_worker_model(node.rank)
         if new_model != node.model:
             node.model = new_model
             model = new_model
@@ -2841,16 +2861,18 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         old_rank = node.rank
         old_model = node.model
         suggested_rank = rv.get("suggested_rank")
+        # A pin (task ForceModel or WORKER_MODEL) freezes the worker model across
+        # retries — only the unpinned path applies suggested_rank / exclude.
         fm = getattr(node, 'force_model', None)
-        if fm:
-            new_model = pam.select(node.rank, usage=_usage, force_model=fm)["name"]
+        if fm or WORKER_MODEL:
+            new_model = _resolve_worker_model(node.rank, force_model=fm)
         elif suggested_rank is not None:
             node.rank = int(suggested_rank)
-            new_model = pam.select(node.rank, usage=_usage)["name"]
+            new_model = _resolve_worker_model(node.rank)
         elif rv.get("exclude_model"):
-            new_model = pam.select(node.rank, exclude=old_model, usage=_usage)["name"]
+            new_model = _resolve_worker_model(node.rank, exclude=old_model)
         else:
-            new_model = pam.select(node.rank, usage=_usage)["name"]
+            new_model = _resolve_worker_model(node.rank)
         if new_model != old_model:
             _history(task_dir, "MODEL_CHANGE", depth,
                 old_rank=old_rank, new_rank=node.rank,
@@ -2899,7 +2921,7 @@ def run_sam(task_dir, task_file="top.md", depth=0):
     plan = prescan(content, task_dir, memory, global_memory, task_file)
     fm = plan.get("force_model")
     cm = plan.get("control_model")
-    model = pam.select(plan["rank"], usage=_usage, force_model=fm or WORKER_MODEL or None)["name"]
+    model = _resolve_worker_model(plan["rank"], force_model=fm)
 
     root = AgentNode(
         agent_id=os.path.basename(task_dir),
