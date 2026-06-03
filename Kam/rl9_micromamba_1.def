@@ -11,10 +11,10 @@ From: rl9_micromamba_0.sif
     dnf -y reinstall coreutils findutils grep sed gawk git curl
 
     # EPEL (needed for ImageMagick, htop)
-    dnf -y install epel-release
+    dnf -y --nobest install epel-release
 
     # Build essentials
-    dnf -y install \
+    dnf -y --nobest install \
         gcc \
         gcc-c++ \
         make \
@@ -26,29 +26,33 @@ From: rl9_micromamba_0.sif
         sqlite-devel
 
     # Display libs (pip install opencv-python links libGL.so at import time;
-    # not needed for matplotlib, PIL, or opencv-headless — conda bundles its own)
-    dnf -y install \
+    # not needed for matplotlib, PIL, or opencv-headless — conda bundles its own).
+    # libglvnd-opengl provides libOpenGL.so.0, required by key4hep DDG4/Geant4
+    # plugins (ddsim) even in batch mode.
+    dnf -y --nobest install \
         mesa-libGL \
-        mesa-libEGL
+        mesa-libEGL \
+        libglvnd-opengl \
+        libglvnd-glx
 
     # Document / image utilities
-    dnf -y install \
+    dnf -y --nobest install \
         poppler-utils \
         graphviz \
         ImageMagick
 
     # System tools (htop needs EPEL)
-    dnf -y install \
+    dnf -y --nobest install \
         htop
 
     # Man / docs / DNS tools
-    dnf -y install \
+    dnf -y --nobest install \
         man-db \
         info \
         bind-utils
 
     # Minimal LaTeX (pdflatex + matplotlib PDF backend support)
-    dnf -y install \
+    dnf -y --nobest install \
         texlive-scheme-basic \
         texlive-amsmath \
         texlive-graphics \

@@ -100,10 +100,11 @@ _check_apptainer() {
     return 1
 }
 _check_apptainer || return 1 2>/dev/null || exit 1
-export SIF=$BASEDIR/Kam/rl9_micromamba_0.sif
+export SIF=$BASEDIR/Kam/rl9_micromamba_1.sif
 export OVERLAY=$BASEDIR/F/F.overlay.img
 export FDIR=$BASEDIR/F
 export TASKS_SRC=$BASEDIR/Sam/tasks
+
 export SKILLS_SRC=$BASEDIR/Nam/skills
 export RANK_SRC=$BASEDIR/Pam/gateway.rank.yaml
 
@@ -166,7 +167,7 @@ export DEFAULT_ENV_SKILL=temp_env
 # export MAX_BASH_TIME=300                # per-bash-call timeout in seconds (default: 300)
 ##
 ## Wall-clock limit per rank (comma-separated, one value per rank 0..N):
-export TOTAL_WALL_PER_RANK=2700,2700,2700,2700,2700,2700   # uniform 45 min safety cap
+export TOTAL_WALL_PER_RANK=27000,2700,027000,27000,27000,27000   # uniform 450 min safety cap
 ##
 ## Model override (optional; task ForceModel/ControlModel take priority):
 ## When set, bypasses pam rank selection. Unset = pam.select(rank) / pam.highest().
