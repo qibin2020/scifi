@@ -1,6 +1,19 @@
 export BASEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PATH=$BASEDIR:$PATH
 
+## Host python — portal.py / driver need >=3.8 (walrus, f-strings). The system
+## python3 on Perlmutter login nodes is 3.6, so fall back to the Playground
+## conda env if the python3 on PATH is too old. Override with SCIF_PYTHON_BIN.
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,8) else 1)' 2>/dev/null; then
+    _scif_pybin="${SCIF_PYTHON_BIN:-/pscratch/sd/b/binus/Playground/conda/py313/bin}"
+    if [ -x "$_scif_pybin/python3" ]; then
+        export PATH="$_scif_pybin:$PATH"
+    else
+        echo "WARNING: host python3 < 3.8 and no fallback at $_scif_pybin — SciF will fail." >&2
+    fi
+    unset _scif_pybin
+fi
+
 ## System defaults
 export TMPDIR=${TMPDIR:-/tmp}
 
@@ -101,6 +114,14 @@ if [[ ! -f ${BASEDIR}/.secret.sh ]]; then
 fi
 chmod 600 ${BASEDIR}/.secret.sh
 . ${BASEDIR}/.secret.sh
+
+# NERSC compute account for SLURM jobs comes from the secret (NERSC_ACCOUNT) —
+# the single source of truth; not hardcoded anywhere. The host-side broker reads
+# SLURM_ACCOUNT (GPU variant <acct>_g is derived automatically); SBATCH_ACCOUNT
+# makes any manual `sbatch` (no --account directive) default to the same account.
+export SLURM_ACCOUNT=${SLURM_ACCOUNT:-${NERSC_ACCOUNT:-}}
+export SBATCH_ACCOUNT=${SBATCH_ACCOUNT:-$SLURM_ACCOUNT}
+
 export GATEWAY_PORT=$(( ($(id -u) % 55535) + 10000 ))
 # export LITELLM_MASTER_KEY=   # leave unset → litellm runs without master key auth
 ## Pinned LiteLLM image (ghcr.io upstream). Bump deliberately; do NOT auto-follow latest.

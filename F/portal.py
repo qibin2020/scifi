@@ -14,6 +14,7 @@ Python 3.6 compatible (runs on host outside container).
 """
 
 from __future__ import print_function
+import json
 import os
 import re
 import shutil
@@ -220,41 +221,67 @@ def resolve_gpu(meta):
 # ============================================================
 
 def resolve_slurm(meta):
-    """Returns list of bind tuples for SLURM tools, or empty list."""
+    """DEPRECATED — returns []. The host sbatch binary cannot run inside the
+    Rocky9 container (host glibc 2.38 > container 2.34), so binding it is futile.
+    SLURM is now exposed through the slurm_submit/slurm_status tools backed by a
+    host-side broker (set `SlurmTool: on`; see _setup_slurm_broker). Kept as a
+    no-op so old `Slurm: on` tasks don't hard-error."""
     slurm = meta.get("Slurm", "off").lower()
-
-    slurm_force = os.environ.get("SLURM_FORCE", "")
-    if slurm_force:
-        slurm = slurm_force.lower()
-
-    # GPU: slurm implies Slurm: on
-    gpu = meta.get("GPU", "no").lower()
-    if gpu == "slurm":
+    if os.environ.get("SLURM_FORCE"):
+        slurm = os.environ["SLURM_FORCE"].lower()
+    if meta.get("GPU", "no").lower() == "slurm":
         slurm = "on"
-
     if slurm == "on":
-        binds = []
-        for cmd in ("sbatch", "squeue", "scancel", "srun", "sacct", "scontrol"):
-            real = shutil.which(cmd)
-            if real:
-                binds.append((real, "/usr/bin/%s" % cmd, "ro"))
-        if not binds:
-            print("[slurm] WARNING: no SLURM binaries found in PATH", file=sys.stderr)
-            return []
-        slurm_lib = None
-        sample = shutil.which("sbatch")
-        if sample:
-            bin_dir = os.path.dirname(os.path.realpath(sample))
-            candidate = os.path.join(os.path.dirname(bin_dir), "lib64", "slurm")
-            if os.path.isdir(candidate):
-                slurm_lib = candidate
-        if slurm_lib:
-            binds.append((slurm_lib, "/usr/lib64/slurm", "ro"))
-        print("[slurm] sbatch mapped into container (%s)" % os.path.dirname(os.path.realpath(shutil.which("sbatch"))), file=sys.stderr)
-        return binds
-
-    print("[slurm] sbatch NOT mapped (Slurm: off)", file=sys.stderr)
+        print("[slurm] 'Slurm: on' is deprecated and now a no-op — use the "
+              "slurm_submit/slurm_status tools (set 'SlurmTool: on').",
+              file=sys.stderr)
     return []
+
+
+def resolve_binds(meta):
+    """Generic extra bind mounts for a task.
+
+    Reads a comma-separated `Binds:` frontmatter key and returns a list of
+    bind tuples. Each item is HOST[:CONTAINER[:MODE]] — CONTAINER defaults to
+    HOST, MODE defaults to 'ro'. Project-agnostic: lets any task expose host
+    paths (e.g. /cvmfs, a CFS dataset) into its container without editing
+    scifi. Mirrors resolve_slurm() — pure mechanism, no policy.
+
+    Example frontmatter:
+        Binds: /cvmfs, /global/cfs/projectdirs/m4956/foo:/srv/foo:ro
+
+    The SCIF_EXTRA_BINDS env var (same syntax) is appended too, so a run can
+    add binds without touching the task file.
+    """
+    specs = []
+    spec = meta.get("Binds", "").strip()
+    if spec:
+        specs.append(spec)
+    env_spec = os.environ.get("SCIF_EXTRA_BINDS", "").strip()
+    if env_spec:
+        specs.append(env_spec)
+
+    out = []
+    seen = set()
+    for chunk in specs:
+        for item in (s.strip() for s in chunk.split(",")):
+            if not item:
+                continue
+            parts = item.split(":")
+            host = parts[0]
+            container = parts[1] if len(parts) > 1 and parts[1] else host
+            mode = parts[2] if len(parts) > 2 and parts[2] else "ro"
+            if container in seen:
+                continue  # dedup by container target (task key vs env var)
+            if not os.path.exists(host):
+                print("[binds] WARNING: host path does not exist, skipping: %s"
+                      % host, file=sys.stderr)
+                continue
+            seen.add(container)
+            out.append((host, container, mode))
+            print("[binds] %s -> %s (%s)" % (host, container, mode),
+                  file=sys.stderr)
+    return out
 
 
 # ============================================================
@@ -314,6 +341,56 @@ def _host_tmp_bind():
     d = tempfile.mkdtemp(prefix="scif_tmp_", dir=base)
     _created_tmp_dirs.append(d)
     return d
+
+
+def _setup_slurm_broker(meta):
+    """If a task sets `SlurmTool: on`, provision the host-side SLURM broker.
+
+    Creates two per-run host dirs (both prefixed scif_tmp_ so _cleanup_tmp_dirs
+    reaps them):
+      - a CHANNEL dir, bound into the container at /slurm (agent writes requests
+        / reads responses here),
+      - a PRIVATE dir, NOT bound into the container, holding the broker config
+        (account/workdir/wrapper), generated scripts, slurm logs, and the
+        submitted-jobid record. Keeping config out of the bind means the agent
+        never sees NERSC specifics.
+
+    Returns (channel_host, slurm_spec) or (None, None) when disabled.
+    `slurm_spec` = {"config_path": <host json path>} for main() to launch the
+    broker. Per-task container profile comes from `SlurmWorkdir:` (project root
+    that maps to /srv) and `SlurmWrapper:` (default driver/enter_scifi_container.sh
+    when a workdir is set; bare command otherwise).
+    """
+    if meta.get("SlurmTool", "off").strip().lower() not in ("on", "true", "yes", "1"):
+        return None, None
+    base = os.environ.get("TMPDIR", "/tmp")
+    channel_host = tempfile.mkdtemp(prefix="scif_tmp_slchan_", dir=base)
+    priv = tempfile.mkdtemp(prefix="scif_tmp_slpriv_", dir=base)
+    _created_tmp_dirs.append(channel_host)
+    _created_tmp_dirs.append(priv)
+    log_dir = os.path.join(priv, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    workdir = (meta.get("SlurmWorkdir", "") or "").strip() or None
+    wrapper = (meta.get("SlurmWrapper", "") or "").strip() or \
+        ("driver/enter_scifi_container.sh" if workdir else None)
+
+    cfg = {
+        # Account comes from ENV.sh (SLURM_ACCOUNT) — single source of truth.
+        # Empty => let SLURM use the user's default account.
+        "account": os.environ.get("SLURM_ACCOUNT", ""),
+        "channel_dir": channel_host,
+        "log_dir": log_dir,
+        "submitted_record": os.path.join(priv, "submitted_jobids"),
+        "workdir": workdir,
+        "wrapper": wrapper,
+    }
+    config_path = os.path.join(priv, "config.json")
+    with open(config_path, "w") as fh:
+        json.dump(cfg, fh)
+    print("[slurm] broker enabled (channel=%s workdir=%s)" % (channel_host, workdir),
+          file=sys.stderr)
+    return channel_host, {"config_path": config_path}
 
 
 def _cleanup_tmp_dirs():
@@ -446,6 +523,15 @@ def build_driver_cmd(task_name, extra_args):
     # SLURM binds
     binds.extend(slurm_binds)
 
+    # Generic extra binds (task `Binds:` key + SCIF_EXTRA_BINDS env)
+    binds.extend(resolve_binds(meta))
+
+    # Host-side SLURM broker channel (SlurmTool: on). The channel dir is bound
+    # at /slurm; the broker config stays host-only (see _setup_slurm_broker).
+    slurm_channel_host, slurm_spec = _setup_slurm_broker(meta)
+    if slurm_channel_host:
+        binds.append((slurm_channel_host, "/slurm", "rw"))
+
     # Build env vars
     env = {
         "GATEWAY_URL": "http://localhost:%s" % _env("GATEWAY_PORT"),
@@ -478,6 +564,8 @@ def build_driver_cmd(task_name, extra_args):
     }
     if cam_dir:
         env["CAM_DIR"] = "/cam"
+    if slurm_spec:
+        env["SLURM_CHANNEL"] = "/slurm"
     if cuda_devices:
         env["CUDA_VISIBLE_DEVICES"] = cuda_devices
     nvd = os.environ.get("NVIDIA_VISIBLE_DEVICES", "")
@@ -496,7 +584,7 @@ def build_driver_cmd(task_name, extra_args):
         + 'python /srv/driver.py %s "$@"\n' % task_name
     )
 
-    return _build_cmd(
+    cmd = _build_cmd(
         overlay=_env("OVERLAY"),
         sif=_env("SIF"),
         binds=binds,
@@ -506,6 +594,7 @@ def build_driver_cmd(task_name, extra_args):
         no_home=True,
         extra_args=extra_args,
     )
+    return cmd, slurm_spec
 
 
 def build_evolution_cmd(extra_args):
@@ -677,23 +766,40 @@ def main():
             sys.exit(1)
         task_name = args[0]
         extra = args[1:]
-        cmd = build_driver_cmd(task_name, extra)
+        cmd, slurm_spec = build_driver_cmd(task_name, extra)
 
     elif profile == "evolution":
         cmd = build_evolution_cmd(args)
+        slurm_spec = None
 
     elif profile == "ask":
         cmd = build_ask_cmd(args)
+        slurm_spec = None
 
     else:
         print("ERROR: unknown profile '%s'. Use: driver, evolution, ask" % profile,
               file=sys.stderr)
         sys.exit(1)
 
+    # Start the host-side SLURM broker (if the task enabled it) BEFORE the agent,
+    # and tear it down after. The broker submits jobs natively on the host; the
+    # agent talks to it via the /slurm channel. Submitted jobs persist past it.
+    broker = None
+    if slurm_spec:
+        broker = subprocess.Popen(
+            [sys.executable, os.path.join(fdir(), "slurm_broker.py"),
+             slurm_spec["config_path"]])
+
     # Execute (subprocess, not execvp, so we can clean up our host tmp dirs).
     try:
         rc = subprocess.call(cmd)
     finally:
+        if broker is not None:
+            broker.terminate()
+            try:
+                broker.wait(timeout=5)
+            except Exception:
+                broker.kill()
         _cleanup_tmp_dirs()
     sys.exit(rc)
 

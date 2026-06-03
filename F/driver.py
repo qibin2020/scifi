@@ -808,6 +808,15 @@ SYSTEM_MNT_RO = """\
 SYSTEM_SUBAGENT = """\
 - subagent: delegate to a sub-SAM by pointing it at a .md task file"""
 
+SYSTEM_SLURM = """\
+- SLURM is available via tools, not the shell (there is no sbatch in here):
+  * slurm_submit(command, time_minutes, cpus, gpus, name) -> `SLURM_SUBMITTED <id>`.
+    Submit long/HPC work (e.g. ddsim); never run it inline in bash.
+  * slurm_status(job_id) -> PENDING | RUNNING | DONE <exit> | FAILED <exit>.
+    Poll it, sleeping ~30s between calls via bash, until DONE.
+  Give only high-level resources; account/partition/QOS are handled for you.
+  After DONE, verify the job's outputs with bash before calling done."""
+
 
 def _build_system_prompt(meta, has_subtasks=False):
     """Assemble SYSTEM prompt from core + conditional sections based on metadata.
@@ -838,6 +847,9 @@ def _build_system_prompt(meta, has_subtasks=False):
 
     if has_subtasks:
         parts.append(SYSTEM_SUBAGENT)
+
+    if os.environ.get("SLURM_CHANNEL"):
+        parts.append(SYSTEM_SLURM)
 
     return "\n\n".join(parts)
 
@@ -1134,6 +1146,23 @@ TOOLS = [
         "description": "Spawn a sub-SAM on a .md task file. Blocks until done.",
         "parameters": {"type": "object", "properties": {
             "task_file": {"type": "string"}}, "required": ["task_file"]}}},
+    {"type": "function", "function": {"name": "slurm_submit",
+        "description": "Submit a SLURM batch job (runs on a compute node). Returns "
+                       "`SLURM_SUBMITTED <jobid>` or `SLURM_ERR <msg>`. Give only "
+                       "high-level resources — account/partition/QOS are handled for you. "
+                       "Do NOT run long work inline; submit it and poll with slurm_status.",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string", "description": "Shell command to run in the job."},
+            "time_minutes": {"type": "integer", "description": "Wall-time minutes (default 30)."},
+            "cpus": {"type": "integer", "description": "Physical CPU cores (default 4)."},
+            "gpus": {"type": "integer", "description": "GPUs (default 0 = CPU job)."},
+            "name": {"type": "string", "description": "Short job name."}},
+            "required": ["command"]}}},
+    {"type": "function", "function": {"name": "slurm_status",
+        "description": "Check a SLURM job. Returns one of: PENDING, RUNNING, DONE <exit>, "
+                       "FAILED <exit>, UNKNOWN. Poll with your own `sleep` (~30s) between calls.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "done",
         "description": "REQUIRED to complete the task. Call this when ALL Expect criteria "
                        "are satisfied. Do not stop generating without calling a tool — "
@@ -1175,6 +1204,12 @@ REVIEW_TOOLS = [
             "text": {"type": "string", "description": "Text to compact"},
             "instruction": {"type": "string", "description": "What to keep/focus on"}},
             "required": ["text"]}}},
+    {"type": "function", "function": {"name": "slurm_status",
+        "description": "Check a SLURM job submitted by the worker. Returns PENDING, "
+                       "RUNNING, DONE <exit>, FAILED <exit>, or UNKNOWN. Use this to "
+                       "independently confirm a job actually ran and its exit code.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "verdict",
         "description": "Verification verdict (done case).",
         "parameters": {"type": "object", "properties": {
@@ -1764,7 +1799,93 @@ def _active_env_header(active):
     return f"[active env: {active['path']}]\n"
 
 
+_slurm_counter = [0]
+
+
+def _slurm_rpc(op, payload, timeout=45):
+    """Round-trip a request to the host-side SLURM broker over the /slurm channel.
+    Returns the broker's response dict, or None if the channel isn't present
+    (task didn't set SlurmTool: on). The container has no working sbatch — all
+    SLURM actions go through this file-based RPC."""
+    chan = os.environ.get("SLURM_CHANNEL")
+    if not chan:
+        return None
+    reqd = os.path.join(chan, "requests")
+    respd = os.path.join(chan, "responses")
+    try:
+        os.makedirs(reqd, exist_ok=True)
+        os.makedirs(respd, exist_ok=True)
+    except OSError:
+        pass
+    _slurm_counter[0] += 1
+    rid = "%d_%d_%d" % (os.getpid(), time.time_ns(), _slurm_counter[0])
+    req = dict(payload)
+    req["id"] = rid
+    req["op"] = op
+    tmp = os.path.join(reqd, "." + rid + ".json.tmp")
+    final = os.path.join(reqd, rid + ".json")
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(req, fh)
+        os.rename(tmp, final)  # atomic — broker never sees a partial request
+    except OSError as e:
+        return {"ok": False, "error": "channel write failed: %s" % e}
+    rp = os.path.join(respd, rid + ".json")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(rp):
+            try:
+                with open(rp) as fh:
+                    obj = json.load(fh)
+            except Exception:
+                time.sleep(0.1)
+                continue
+            try:
+                os.remove(rp)
+            except OSError:
+                pass
+            return obj
+        time.sleep(0.2)
+    return {"ok": False, "error": "broker timeout"}
+
+
+def _slurm_tool(name, args):
+    """Map a slurm_* tool call to a broker RPC and a tiny one-line token."""
+    if name == "slurm_submit":
+        r = _slurm_rpc("submit", {
+            "command": args.get("command", ""),
+            "time_minutes": args.get("time_minutes", 30),
+            "cpus": args.get("cpus", 4),
+            "gpus": args.get("gpus", 0),
+            "name": args.get("name", "scifjob"),
+        })
+        if r is None:
+            return "SLURM_ERR slurm tools not enabled for this task (set SlurmTool: on)"
+        return "SLURM_SUBMITTED %s" % r.get("job_id") if r.get("ok") \
+            else "SLURM_ERR %s" % r.get("error", "submit failed")
+    if name == "slurm_status":
+        r = _slurm_rpc("status", {"job_id": args.get("job_id", "")})
+        if r is None:
+            return "SLURM_ERR slurm tools not enabled"
+        if not r.get("ok"):
+            return "SLURM_ERR %s" % r.get("error", "status failed")
+        st = r.get("state", "UNKNOWN")
+        if st == "DONE":
+            return "DONE %s" % r.get("exit", "0")
+        if st == "FAILED":
+            return "FAILED %s" % r.get("exit", "1")
+        return st  # PENDING | RUNNING | UNKNOWN
+    if name == "slurm_cancel":
+        r = _slurm_rpc("cancel", {"job_id": args.get("job_id", "")})
+        if r is None:
+            return "SLURM_ERR slurm tools not enabled"
+        return "CANCELLED" if r.get("ok") else "SLURM_ERR %s" % r.get("error", "cancel failed")
+    return "ERROR: unknown slurm tool '%s'" % name
+
+
 def _execute_tool_readonly(name, args, task_dir):
+    if name == "slurm_status":
+        return _slurm_tool(name, args)
     try:
         if name == "bash":
             active = _load_active_env(task_dir)
@@ -1809,6 +1930,8 @@ def _execute_tool_reflect(name, args, task_dir):
 
 def _execute_tool(name, args, task_dir, node, scheduler):
     """Worker tool dispatch. Handles subagent via scheduler."""
+    if name in ("slurm_submit", "slurm_status", "slurm_cancel"):
+        return _slurm_tool(name, args)
     try:
         if name == "bash":
             # Agent suggests timeout, capped by task's bash_time (-1 = no cap)
@@ -2585,7 +2708,7 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         node._task_wall_start = wall_start
     _ensure_wall_watchdog(node._task_wall_start, total_wall)
     excluded_time = 0.0  # subagent + tool time (excluded from wall limit)
-    READONLY_TOOLS = {"read_file", "memory_read", "compact"}
+    READONLY_TOOLS = {"read_file", "memory_read", "compact", "slurm_status"}
 
     effective_iter = 0  # only counts iterations with mutating tool calls
     total_iter = 0      # counts all iterations (for logging)

@@ -19,6 +19,23 @@ BINDS=( --bind "$PWD":/srv:rw --bind "${TMPDIR:-/tmp}":/tmp:rw )
 [ -d "$BASEDIR/F/mnt" ]  && BINDS+=( --bind "$BASEDIR/F/mnt":/mnt:rw )
 [ -d "$BASEDIR/F/home" ] && BINDS+=( --bind "$BASEDIR/F/home":/home:rw )
 
+# Generic extra binds: SCIF_EXTRA_BINDS="HOST[:CONTAINER[:MODE]],..." (MODE default ro)
+if [ -n "${SCIF_EXTRA_BINDS:-}" ]; then
+    IFS=',' read -ra _eb <<< "$SCIF_EXTRA_BINDS"
+    for _item in "${_eb[@]}"; do
+        _item="$(echo "$_item" | xargs)"   # trim whitespace
+        [ -z "$_item" ] && continue
+        IFS=':' read -r _h _c _m <<< "$_item"
+        _c="${_c:-$_h}"; _m="${_m:-ro}"
+        if [ -e "$_h" ]; then
+            BINDS+=( --bind "${_h}:${_c}:${_m}" )
+            echo "[F.debug] extra bind: ${_h} -> ${_c} (${_m})" >&2
+        else
+            echo "[F.debug] WARNING: extra bind host missing, skipping: ${_h}" >&2
+        fi
+    done
+fi
+
 # GPU auto-detect — CUDA_VISIBLE_DEVICES wins, nvidia-smi is the fallback.
 GPU_ARGS=()
 if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
