@@ -202,7 +202,10 @@ def _do_status(req):
     if state.startswith("COMPLETED"):
         return {"ok": True, "state": "DONE", "exit": exitc}
     if state in _FAIL_STATES:
-        return {"ok": True, "state": "FAILED", "exit": exitc or "1"}
+        # Pass the sacct state name through so the agent can see WHY it failed
+        # (OUT_OF_MEMORY vs TIMEOUT vs NODE_FAIL need different fixes).
+        return {"ok": True, "state": "FAILED", "exit": exitc or "1",
+                "reason": state}
     if state == "UNKNOWN":
         return {"ok": True, "state": "UNKNOWN"}
     return {"ok": True, "state": "RUNNING"}

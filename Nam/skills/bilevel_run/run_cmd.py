@@ -51,8 +51,18 @@ def build(config, run, mode, parallel):
         # generate -> parallel ddsim -> inner, as ONE chain.
         # NOTE: the payload is invoked with `bash` (subprocess), NOT `source`:
         # its `set -e` / `exit 0` would otherwise kill the chain and skip inner.
+        #
+        # Parallelism is NOT baked into the command: the payload self-sizes to
+        # its allocation at runtime (clamps to nproc/2, the memory-safe ddsim
+        # count). This removes the cpus-vs-MAX_PARALLEL consistency burden from
+        # the agent — it chooses ONE number (slurm_submit cpus) and the job
+        # adapts. An explicit --parallel still overrides (clamped by the
+        # payload), for manual/bench use.
         gen = "%s --stage outer --run-mode generate --run %s" % (base, run)
-        ddsim = "RUN_NAME=%s MAX_PARALLEL=%d bash %s" % (run, parallel, PAYLOAD)
+        if parallel is not None:
+            ddsim = "RUN_NAME=%s MAX_PARALLEL=%d bash %s" % (run, parallel, PAYLOAD)
+        else:
+            ddsim = "RUN_NAME=%s bash %s" % (run, PAYLOAD)
         inner = "%s --stage inner --run %s" % (base, run)
         cmd = "%s && %s && %s" % (gen, ddsim, inner)
         return cmd, True
@@ -67,8 +77,10 @@ def main():
     p.add_argument("--run", required=True, help="Run name, e.g. run_skilltest")
     p.add_argument("--mode", required=True,
                    choices=["full", "generate", "outer", "inner", "evaluate"])
-    p.add_argument("--parallel", type=int, default=8,
-                   help="MAX_PARALLEL for ddsim in full mode (match cpus; small=fast scheduling).")
+    p.add_argument("--parallel", type=int, default=None,
+                   help="Explicit MAX_PARALLEL override for ddsim in full mode. "
+                        "Default: omit — the job self-sizes to its allocation "
+                        "(payload clamps to nproc/2).")
     args = p.parse_args()
 
     try:

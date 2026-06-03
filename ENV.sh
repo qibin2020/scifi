@@ -171,8 +171,8 @@ export TOTAL_WALL_PER_RANK=27000,2700,027000,27000,27000,27000   # uniform 450 m
 ##
 ## Model override (optional; task ForceModel/ControlModel take priority):
 ## When set, bypasses pam rank selection. Unset = pam.select(rank) / pam.highest().
-export WORKER_MODEL=gemma4-thinking    # worker model (bench 2026-05-19: think both = fastest)
-export REVIEW_MODEL=gemma4-thinking    # review model (think review catches bugs faster)
+export WORKER_MODEL=gemma4    # worker model (bench 2026-05-19: think both = fastest)
+export REVIEW_MODEL=gemma4              # review model (non-thinking)
 ##
 ## Robustness (raise to tolerate flaky providers):
 # export ERROR_LIMIT=5                    # consecutive API errors → blacklist model (default: 5)

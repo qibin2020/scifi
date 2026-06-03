@@ -1,0 +1,41 @@
+# Tiny bilevel smoke config for the F-agent (agent-mount) — 1 geometry, 2 events.
+# Paths are the agent-container mounts: project at /srv/bilevel, k4geo at
+# /srv/k4geo, persistent output at /srv/runs. Used by the bilevel_local task.
+run_mode: local
+key4hep: {run_setup: false, setup_script: "true"}
+
+detectors:
+  scepcal:
+    repo_root:      /srv/k4geo
+    source_script:  /srv/k4geo/install/bin/thisk4geo.sh
+    steering_file:  /srv/bilevel/detector_config/IDEA_o2_v01/SteeringFile_IDEA_o2_v01.py
+    compact_xml:    /srv/bilevel/detector_config/IDEA_o2_v01/IDEA_o2_v01.xml
+    dimensions_xml: /srv/bilevel/detector_config/IDEA_o2_v01/DectDimensions_IDEA_o2_v01.xml
+
+runtime:
+  runs_dir: /srv/runs
+  ddsim_executable: ddsim
+  scheduler: {slurm: {account: m2616}}
+
+runs:
+  - name: run_local
+    outer_loop:
+      detector_label: scepcal
+      seeds: {start: 0, end: 0}
+      geometry:
+        - {parameter: scepcal_xtal_theta_width,    start: 5.0, stop: 5.0, step: 1.0, unit: cm}
+        - {parameter: scepcal_projective_offset_r, start: 0.0, stop: 0.0, step: 1.0, unit: cm}
+      sim: {particles: [e-], events: 2, momentum_GeV: 1, plusminus_percent: 0, theta_min: 80, theta_max: 100}
+    inner_loop:
+      tree_name: events
+      branches: [{name: SCEPCal_MainEdep, hit_type: SimCalorimeterHit}]
+      geometry_labels: {scepcal_xtal_theta_width: "w", scepcal_projective_offset_r: "r"}
+      algorithm:
+        name: seeded_radius_cog
+        params: {branch: SCEPCal_MainEdep}
+        optimize_method: differential_evolution
+        optimize_params:
+          - {name: R_cluster_mm, label: "R", bounds: [0.0, 200.0], plot_grid_points: 6}
+          - {name: E_threshold_GeV, label: "E", bounds: [0.0, 1.0], plot_grid_points: 4}
+      score: {name: snr_energy, params: {sigma0: 1.0}}
+      max_events: null

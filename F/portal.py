@@ -562,6 +562,14 @@ def build_driver_cmd(task_name, extra_args):
         "EFFECTIVE_COMMON_STORAGE": common_storage,
         "EFFECTIVE_COMMON_HOME": common_home,
     }
+    # Campaign / session identity for the data plane. Skills resolve
+    # CAMPAIGN = SCIF_CAMPAIGN (the `Campaign:` frontmatter key — gives chained
+    # tasks a stable shared namespace) falling back to SCIF_SESSION (this
+    # invocation's unique id — isolates self-contained tasks per run).
+    env["SCIF_SESSION"] = os.path.basename(run_dir)
+    _campaign = (meta.get("Campaign", "") or "").strip()
+    if _campaign:
+        env["SCIF_CAMPAIGN"] = _campaign
     if cam_dir:
         env["CAM_DIR"] = "/cam"
     if slurm_spec:

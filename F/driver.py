@@ -1206,8 +1206,11 @@ REVIEW_TOOLS = [
             "required": ["text"]}}},
     {"type": "function", "function": {"name": "slurm_status",
         "description": "Check a SLURM job submitted by the worker. Returns PENDING, "
-                       "RUNNING, DONE <exit>, FAILED <exit>, or UNKNOWN. Use this to "
-                       "independently confirm a job actually ran and its exit code.",
+                       "RUNNING, DONE <exit>, FAILED <exit> [reason], or UNKNOWN. "
+                       "This tool IS available to you. When any Expect item "
+                       "references a SLURM job or 'DONE 0', you MUST call it with "
+                       "the worker's job id — output files existing is NOT a proxy "
+                       "for job success (files may be stale from an earlier run).",
         "parameters": {"type": "object", "properties": {
             "job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "verdict",
@@ -1873,7 +1876,9 @@ def _slurm_tool(name, args):
         if st == "DONE":
             return "DONE %s" % r.get("exit", "0")
         if st == "FAILED":
-            return "FAILED %s" % r.get("exit", "1")
+            reason = r.get("reason", "")
+            return "FAILED %s%s" % (r.get("exit", "1"),
+                                    " %s" % reason if reason else "")
         return st  # PENDING | RUNNING | UNKNOWN
     if name == "slurm_cancel":
         r = _slurm_rpc("cancel", {"job_id": args.get("job_id", "")})
