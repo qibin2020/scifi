@@ -636,8 +636,11 @@ def build_evolution_cmd(extra_args):
     env = {
         "GATEWAY_URL": "http://localhost:%s" % _env("GATEWAY_PORT"),
         "FALLBACK_HIGHEST": _env("FALLBACK_HIGHEST"),
-        **({k: v} if (v := _env_opt("MAX_EVOLVE_ITER")) else {}),
     }
+    # Optional override; host python is 3.6 — no walrus/f-strings in this file.
+    _mev = _env_opt("MAX_EVOLVE_ITER")
+    if _mev:
+        env["MAX_EVOLVE_ITER"] = _mev
     if cam_dir:
         env["CAM_DIR"] = "/cam"
 
