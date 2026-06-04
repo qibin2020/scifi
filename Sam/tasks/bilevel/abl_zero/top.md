@@ -29,21 +29,17 @@ runs a scan, and its analysis decides the next epoch's scan.
 - Tune the **cluster radius over 20 to 150 mm (15-point grid)** and the
   **energy threshold over 0 to 1.0 GeV (5-point grid)**, scoring `snr_energy`.
 
-**Epochs 2–5 — each derived from the previous epoch's report** using the
-`bilevel_ana` trend rules:
+**Epochs 2–5 — each derived from the previous epoch's report:**
 
-- A parameter that **RISES** (or FALLS) to the edge of its scanned range →
-  scan **4 values beyond that edge**, keeping the previous spacing.
-- A **FLAT** parameter → fix it at its best value.
-- If **all** scanned parameters are FLAT → scan a previously-fixed geometry
-  parameter instead (first the projective offset, then the rear length):
-  4 values around its current value.
+- Each later epoch: decide the next 4-geometry scan yourself from the previous
+  epoch's report, your physics knowledge of electromagnetic calorimetry, and
+  the goal of finding the best-resolution geometry. Justify each choice in one
+  sentence in the report.
 - Keep the reconstruction setup and event count unchanged. Each follow-up
   epoch scans exactly **4 geometries**.
 
-Name the runs `epoch1` … `epoch5` (the skills place configs and outputs in
-this run's campaign area automatically; SLURM is handled by the `bilevel_run`
-skill's runner). After each epoch, write its
+Name the runs `azr1` … `azr5` (the skills place configs and outputs in this run's campaign area automatically; SLURM
+handled by the `bilevel_run` skill's runner). After each epoch, write its
 report to `./analysis_<k>.md` — the reports stay in this working directory,
 and each epoch reads the previous one from here.
 
@@ -68,9 +64,9 @@ overall best geometry, its score, and the main caveat.
 
 - For each k in 1..5: the builder printed `CONFIG_VALIDATED` (geometries=6 for
   epoch 1, geometries=4 for epochs 2–5), the full-runner printed
-  `RUN_VERIFIED run=epoch<k>` with a job id, and `./analysis_<k>.md` exists
+  `RUN_VERIFIED run=azr<k>` with a job id, and `./analysis_<k>.md` exists
   with sections Best point, Trends, Reliability, Conclusion.
-- Epoch 2's scan follows epoch 1's report (the rising-edge parameter extended,
-  FLAT parameters fixed at their best values).
+- Each `analysis_<k>.md` (k>=2) contains a one-sentence justification of the
+  scan choice.
 - `./campaign.md` exists with the 5-epoch summary, the overall best geometry
   and score, and one recommendation.
