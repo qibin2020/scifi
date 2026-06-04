@@ -185,7 +185,7 @@ def main():
         pass
 
     cpus = min(8, max(4, geoms))
-    command, _ = run_cmd.build(cfg, name, "full", None)
+    command, _ = run_cmd.build(cfg, name, "full", None, runs_dir=runs_dir)
 
     r = rpc("submit", {"command": command, "time_minutes": tmin,
                        "cpus": cpus, "gpus": 0, "name": name})

@@ -30,8 +30,11 @@ BILEVEL = "bilevel_opt"
 PAYLOAD = "/srv/driver/slurm_outer_payload.sh"
 
 
-def build(config, run, mode, parallel):
-    """Return (command_string, is_slurm)."""
+def build(config, run, mode, parallel, runs_dir=None):
+    """Return (command_string, is_slurm). runs_dir (the config's runtime.runs_dir,
+    i.e. the campaign area) is forwarded to the ddsim payload as RUNS_DIR so it
+    finds the manifest under /srv/runs/<campaign>/<run>/ instead of the legacy
+    flat /srv/runs/<run>/."""
     base = "%s --config %s" % (BILEVEL, config)
 
     if mode in ("generate", "outer"):
@@ -59,10 +62,11 @@ def build(config, run, mode, parallel):
         # adapts. An explicit --parallel still overrides (clamped by the
         # payload), for manual/bench use.
         gen = "%s --stage outer --run-mode generate --run %s" % (base, run)
+        rd = "RUNS_DIR=%s " % runs_dir if runs_dir else ""
         if parallel is not None:
-            ddsim = "RUN_NAME=%s MAX_PARALLEL=%d bash %s" % (run, parallel, PAYLOAD)
+            ddsim = "RUN_NAME=%s %sMAX_PARALLEL=%d bash %s" % (run, rd, parallel, PAYLOAD)
         else:
-            ddsim = "RUN_NAME=%s bash %s" % (run, PAYLOAD)
+            ddsim = "RUN_NAME=%s %sbash %s" % (run, rd, PAYLOAD)
         inner = "%s --stage inner --run %s" % (base, run)
         cmd = "%s && %s && %s" % (gen, ddsim, inner)
         return cmd, True
@@ -77,6 +81,9 @@ def main():
     p.add_argument("--run", required=True, help="Run name, e.g. run_skilltest")
     p.add_argument("--mode", required=True,
                    choices=["full", "generate", "outer", "inner", "evaluate"])
+    p.add_argument("--runs-dir", default=None,
+                   help="config's runtime.runs_dir (campaign area) forwarded to "
+                        "the ddsim payload; omit for legacy flat /srv/runs.")
     p.add_argument("--parallel", type=int, default=None,
                    help="Explicit MAX_PARALLEL override for ddsim in full mode. "
                         "Default: omit — the job self-sizes to its allocation "
@@ -84,7 +91,8 @@ def main():
     args = p.parse_args()
 
     try:
-        cmd, is_slurm = build(args.config, args.run, args.mode, args.parallel)
+        cmd, is_slurm = build(args.config, args.run, args.mode, args.parallel,
+                              args.runs_dir)
     except ValueError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
         return 2
