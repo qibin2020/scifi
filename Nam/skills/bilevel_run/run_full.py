@@ -12,7 +12,7 @@ Usage:
 
 <CFG>   config path; a file in the task dir (shipped config) is staged into
         the campaign area automatically; a bare filename is looked up there.
-<G>     geometry count — sets cpus = min(8, max(4, G)) and the verify target.
+<G>     geometry count — sets cpus = min(32, max(4, G)) and the verify target.
 
 CAMPAIGN AREA. All runs live under /srv/runs/<CAMPAIGN>/ where
 CAMPAIGN = $SCIF_CAMPAIGN (the task's `Campaign:` key — stable name shared by
@@ -184,7 +184,10 @@ def main():
     except OSError:
         pass
 
-    cpus = min(8, max(4, geoms))
+    # 32 physical cores (= 64 logical, quarter node) is the empirical largest
+    # request that still backfills quickly on Perlmutter shared; 64-core
+    # (half-node) requests sat >2.5 h with no ETA (measured 2026-06-04).
+    cpus = min(32, max(4, geoms))
     command, _ = run_cmd.build(cfg, name, "full", None, runs_dir=runs_dir)
 
     r = rpc("submit", {"command": command, "time_minutes": tmin,

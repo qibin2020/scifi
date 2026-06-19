@@ -106,7 +106,7 @@ bash /srv/skills/bilevel_run/run_local.sh ./run_local.yaml run_local generate
 
 ## Internals (you never manage these — for reference only)
 
-- SLURM sizing is `cpus = min(8, max(4, G))`, small on purpose: small shared
+- SLURM sizing is `cpus = min(32, max(4, G))`, small on purpose: small shared
   requests backfill instantly on Perlmutter; big ones queue. ddsim parallelism
   self-sizes to the allocation inside the job (memory-safe clamp).
 - The command chain invokes the ddsim payload with `bash` (a subprocess), never

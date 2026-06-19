@@ -75,7 +75,7 @@ OPTIMIZE_METHODS = {
     "differential_evolution", "dual_annealing", "shgo", "brute",
 }
 
-SCORES = {"snr_energy"}
+SCORES = {"snr_energy", "energy_resolution"}
 ALGORITHMS = {"seeded_radius_cog"}
 
 # Nice axis labels for known params (for plots / geometry_labels).
@@ -191,6 +191,13 @@ def geom_npoints(g: dict) -> int:
 # ---------------------------------------------------------------------------
 # Build the config dict
 # ---------------------------------------------------------------------------
+def score_params(args: argparse.Namespace) -> dict:
+    """Constructor params for the chosen score (matches its __init__ signature)."""
+    if args.score == "energy_resolution":
+        return {"sigma_noise_GeV": args.sigma_noise}
+    return {"sigma0": args.sigma0}
+
+
 def build_config(args: argparse.Namespace) -> dict:
     if args.optimize_method not in OPTIMIZE_METHODS:
         sys.exit(f"Unknown --optimize-method '{args.optimize_method}'. "
@@ -226,7 +233,7 @@ def build_config(args: argparse.Namespace) -> dict:
         "branches": [{"name": args.branch, "hit_type": args.hit_type}],
         "geometry_labels": geom_labels,
         "algorithm": algo_block,
-        "score": {"name": args.score, "params": {"sigma0": args.sigma0}},
+        "score": {"name": args.score, "params": score_params(args)},
         "max_events": None,
     }
 
@@ -317,7 +324,10 @@ def make_parser() -> argparse.ArgumentParser:
                    help="brute | differential_evolution | dual_annealing | shgo | "
                         "L-BFGS-B | bounded.")
     p.add_argument("--score", default="snr_energy")
-    p.add_argument("--sigma0", type=float, default=1.0)
+    p.add_argument("--sigma0", type=float, default=1.0,
+                   help="snr_energy per-event noise scale")
+    p.add_argument("--sigma-noise", type=float, default=0.05,
+                   help="energy_resolution per-channel noise scale [GeV]")
 
     p.add_argument("--run-mode", choices=["generate", "local", "slurm"],
                    default="generate")

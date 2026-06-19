@@ -39,6 +39,7 @@ F/home/*
 
 # Move-aside cleanups (rename-with-suffix instead of delete)
 **/*.deleted
+**/*.deleted/
 **/*.deleted-*
 **/.deleted-*
 
@@ -63,3 +64,5 @@ F/home/.ssh/id*
 .secret.sh
 RD/
 ME.md
+
+F/*.archive*/

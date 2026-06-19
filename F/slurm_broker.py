@@ -138,7 +138,83 @@ def _build_script(cfg, req):
     return "#!/bin/bash\n" + "\n".join(directives) + "\n\n" + body_pre + body
 
 
+# --- Local backend ----------------------------------------------------------
+# When BILEVEL_BROKER_LOCAL is set, the broker runs the EXACT SAME script it
+# would submit to SLURM (the #SBATCH lines are inert bash comments) with `bash`
+# on the node the broker sits on, capturing the exit code to a file. The
+# submit/status/cancel RPC shape is identical, so run_full.py, the command
+# chain, the container wrapper, verify.sh, the marker and the ledger are all
+# exercised exactly as in SLURM mode -- only `sbatch`/`sacct` are bypassed.
+_LOCAL_JOBS = {}
+
+
+def _local_enabled():
+    return os.environ.get("BILEVEL_BROKER_LOCAL", "").strip().lower() \
+        not in ("", "0", "false", "no", "off")
+
+
+def _do_submit_local(cfg, req):
+    script = _build_script(cfg, req)
+    rid = str(req["id"])
+    jid = "local-" + rid
+    sf = os.path.join(cfg["log_dir"], "job_%s.slurm" % rid)
+    logf = os.path.join(cfg["log_dir"], "job_%s.out" % rid)
+    rcf = os.path.join(cfg["log_dir"], "job_%s.rc" % rid)
+    try:
+        with open(sf, "w") as fh:
+            fh.write(script)
+        if os.path.exists(rcf):
+            os.remove(rcf)
+    except OSError as e:
+        return {"ok": False, "error": str(e)[:200]}
+    cwd = cfg.get("workdir") or cfg["log_dir"]
+    wrapper = "bash %s > %s 2>&1; echo $? > %s" % (
+        shlex.quote(sf), shlex.quote(logf), shlex.quote(rcf))
+    try:
+        p = subprocess.Popen(["bash", "-c", wrapper], cwd=cwd,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    _LOCAL_JOBS[jid] = {"pid": p.pid, "rc": rcf, "proc": p}
+    return {"ok": True, "job_id": jid}
+
+
+def _do_status_local(jid):
+    info = _LOCAL_JOBS.get(jid)
+    rcf = info["rc"] if info else None
+    if rcf and os.path.exists(rcf):
+        try:
+            with open(rcf) as fh:
+                rc = fh.read().strip()
+        except OSError:
+            rc = ""
+        rc = rc or "1"
+        if rc == "0":
+            return {"ok": True, "state": "DONE", "exit": "0"}
+        return {"ok": True, "state": "FAILED", "exit": rc,
+                "reason": "LOCAL_EXIT_%s" % rc}
+    if info is not None:
+        proc = info.get("proc")
+        if proc is None or proc.poll() is None:
+            return {"ok": True, "state": "RUNNING"}
+        # process gone but no rc file written yet -> give the next poll a chance
+        return {"ok": True, "state": "RUNNING"}
+    return {"ok": True, "state": "UNKNOWN"}
+
+
+def _do_cancel_local(jid):
+    info = _LOCAL_JOBS.get(jid)
+    if info:
+        try:
+            os.kill(info["pid"], signal.SIGTERM)
+        except OSError:
+            pass
+    return {"ok": True, "state": "CANCELLED"}
+
+
 def _do_submit(cfg, req):
+    if _local_enabled():
+        return _do_submit_local(cfg, req)
     script = _build_script(cfg, req)
     sf = os.path.join(cfg["log_dir"], "job_%s.slurm" % req["id"])
     with open(sf, "w") as fh:
@@ -169,6 +245,8 @@ _FAIL_STATES = ("FAILED", "TIMEOUT", "CANCELLED", "OUT_OF_MEMORY", "NODE_FAIL", 
 
 def _do_status(req):
     jid = str(req.get("job_id", "")).strip()
+    if jid.startswith("local-"):
+        return _do_status_local(jid)
     if not jid.isdigit():
         return {"ok": False, "error": "bad job_id"}
     # In-queue check first (covers PENDING/RUNNING/COMPLETING).
@@ -213,6 +291,8 @@ def _do_status(req):
 
 def _do_cancel(req):
     jid = str(req.get("job_id", "")).strip()
+    if jid.startswith("local-"):
+        return _do_cancel_local(jid)
     if not jid.isdigit():
         return {"ok": False, "error": "bad job_id"}
     try:
