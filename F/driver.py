@@ -1507,7 +1507,13 @@ def _api_call(client, model, messages, tools, retries=3,
         tb = max(tb, 0)
         if tb > 0:
             kwargs["max_tokens"] = tb + 1024
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": tb}
+            # Pass `thinking` via extra_body, NOT as a top-level kwarg: the OpenAI
+            # SDK's create() has no `thinking` parameter and would raise
+            # "unexpected keyword argument 'thinking'" client-side (before litellm's
+            # drop_params can act). extra_body is merged into the request JSON body,
+            # so the litellm proxy receives it and handles/drops it as configured.
+            kwargs.setdefault("extra_body", {})["thinking"] = {
+                "type": "enabled", "budget_tokens": tb}
         else:
             kwargs["max_tokens"] = min(4096, model_max_tokens)
     else:
@@ -2700,6 +2706,12 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
     review_failures = 0
     consecutive_nudges = 0   # detect models that can't use tools
     consecutive_errors = 0   # detect models with persistent API errors
+    last_tool_sig = None     # detect models stuck repeating identical tool calls
+    repeat_tool_count = 0    # consecutive identical-tool-call turns (0 = first)
+    env_activated = False    # once a shared env is activated, stop offering
+                             # activate_env so the model can't loop on it
+    list_shared_done = False # list_shared_envs is idempotent; after one call its
+                             # result is known, so drop it to prevent re-poll loops
     wall_start = time.time()
     # Per-TASK total-wall start: sticky across retries. The first call to
     # _run_sam for this node sets it; subsequent recursive retries inherit it
@@ -2756,9 +2768,20 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
 
         messages = _trim_messages(messages)
 
-        # API call
+        # API call. Once a shared env is active, drop the env-discovery tools from
+        # the offered set — some reasoning models otherwise fixate on re-calling
+        # them every turn (esp. after each task re-injection), burning the budget.
+        offered_tools = task_tools
+        _drop = set()
+        if list_shared_done:
+            _drop.add("list_shared_envs")
+        if env_activated:
+            _drop.add("activate_env")
+        if _drop:
+            offered_tools = [t for t in task_tools
+                             if t["function"]["name"] not in _drop]
         try:
-            response = _api_call(client, model, messages, task_tools,
+            response = _api_call(client, model, messages, offered_tools,
                 thinking=node.thinking, thinking_budget=node.thinking_budget)
             consecutive_errors = 0
         except Exception as e:
@@ -2826,6 +2849,8 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
         consecutive_nudges = 0  # reset on successful tool use
         # Process tool calls
         tool_calls = list(msg.tool_calls)
+        cur_tool_sig = tuple((tc.function.name, tc.function.arguments)
+                             for tc in tool_calls)
         iter_has_mutation = False  # track if this iteration has a mutating tool
         for idx, tc in enumerate(tool_calls):
             node.check_pause()  # pause check between tools
@@ -2929,6 +2954,40 @@ def _run_sam(node, context=None, wall_limit=None, plan=None, control_model=None)
                     tool=tc.function.name, result=str(result)[:300])
                 messages.append({"role": "tool", "tool_call_id": tc.id,
                     "content": str(result)})
+                # Drop env-discovery tools once they've served their purpose
+                # (filtered at the next API call) to prevent re-poll loops.
+                if tc.function.name == "list_shared_envs":
+                    list_shared_done = True
+                if (tc.function.name == "activate_env"
+                        and str(result).lstrip().upper().startswith("OK")):
+                    env_activated = True
+
+        # --- REPEATED-IDENTICAL-TOOL-CALL BREAKER ---
+        # Some models (notably reasoning variants) get stuck re-emitting the exact
+        # same tool call every turn, ignoring the identical result and burning the
+        # iteration budget. Detect it and inject an escalating corrective so the
+        # model acts on the result it already has instead of re-polling.
+        if "done" in {tc.function.name for tc in tool_calls}:
+            repeat_tool_count = 0
+            last_tool_sig = None
+        else:
+            if cur_tool_sig == last_tool_sig:
+                repeat_tool_count += 1
+            else:
+                repeat_tool_count = 0
+            last_tool_sig = cur_tool_sig
+            if repeat_tool_count >= 1:
+                names = ", ".join(sorted({tc.function.name for tc in tool_calls}))
+                _history(task_dir, "REPEATED_TOOL_CALL", depth,
+                         tool=names, count=repeat_tool_count + 1)
+                print(f"{prefix}  [repeated tool call] {names} x{repeat_tool_count + 1}",
+                      flush=True)
+                messages.append({"role": "user",
+                    "content": f"STOP repeating yourself. You just called `{names}` with the "
+                    f"SAME arguments {repeat_tool_count + 1} times in a row and got the SAME "
+                    f"result every time — calling it again changes nothing. Act on the result "
+                    f"you already have and take the NEXT concrete step toward the task (e.g. run "
+                    f"a bash command, write a file). Do NOT call `{names}` again."})
 
         # Only count this iteration against the budget if it had a mutating tool
         if iter_has_mutation:

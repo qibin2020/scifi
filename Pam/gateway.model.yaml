@@ -438,4 +438,7 @@ router_settings:
 
 litellm_settings:
   modify_params: true
+  drop_params: true              # drop provider-unsupported kwargs (e.g. the driver's Anthropic-style
+                                 # `thinking=` for gemma4-thinking, which Ollama's OpenAI /v1 rejects;
+                                 # thinking is already enabled gateway-side via extra_body think:true).
   request_timeout: 300           # backstop on pathological queue depth — caller never blocks > 5 min per call

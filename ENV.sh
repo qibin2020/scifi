@@ -166,12 +166,13 @@ export DEFAULT_ENV_SKILL=temp_env
 # export MAX_BASH_TIME=300                # per-bash-call timeout in seconds (default: 300)
 ##
 ## Wall-clock limit per rank (comma-separated, one value per rank 0..N):
-export TOTAL_WALL_PER_RANK=2700,2700,2700,2700,2700,2700   # uniform 45 min safety cap
+## Overridable: export TOTAL_WALL_PER_RANK before sourcing for long full-scale training runs.
+export TOTAL_WALL_PER_RANK=${TOTAL_WALL_PER_RANK:-2700,2700,2700,2700,2700,2700}   # default 45 min safety cap
 ##
 ## Model override (optional; task ForceModel/ControlModel take priority):
 ## When set, bypasses pam rank selection. Unset = pam.select(rank) / pam.highest().
-export WORKER_MODEL=gemma4-thinking    # worker model (bench 2026-05-19: think both = fastest)
-export REVIEW_MODEL=gemma4-thinking    # review model (think review catches bugs faster)
+export WORKER_MODEL=${WORKER_MODEL:-gemma4-thinking}    # worker model (override: export before SciF RUN)
+export REVIEW_MODEL=${REVIEW_MODEL:-gemma4-thinking}    # review model (override: export before SciF RUN)
 ##
 ## Robustness (raise to tolerate flaky providers):
 # export ERROR_LIMIT=5                    # consecutive API errors → blacklist model (default: 5)
