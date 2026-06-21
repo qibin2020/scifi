@@ -1,0 +1,7 @@
+task,topology,ebop_target,epochs,train_time_s,train_time_min,mse,mae,ebops_achieved,notes
+v1_ref,1conv_simple,none,1000,799.5,13.3,4.2096,1.6042,257287,unconstrained baseline (ref MAE ~1.55)
+v3_ref,2conv_einsum,none,1000,896.2,14.9,0.1832,0.2146,41179,unconstrained baseline (ref MAE ~0.2)
+v1_opt,1conv_simple,3000,1500,1313.5,21.9,4.8252,1.7108,22594,PID+Pareto; 11x EBOP cut vs ref (matches ref ~21.7k)
+v3_opt,2conv_einsum,3000,1500,1502.4,25.0,0.3131,0.3034,39144,PID+Pareto; einsum model resists compression
+v1_opt2,1conv_simple,1500,4000,3201.7,53.4,6.7085,2.0341,1668,tight budget reached (1668; matches ref ~1.6k)
+v3_opt2,2conv_einsum,1500,4000,3706.6,61.8,0.2617,0.2994,7570,tight budget; einsum floors near ~7.6k EBOPs

@@ -1,0 +1,8 @@
+task,topology,ebop_target,model,result,attempts_to_first_pass,ebops_achieved,bit_exact_outputs,wall_approx_min,notes
+haml_bootstrap,env_setup,n/a,gemma4,PASS,1,n/a,n/a,3,cold agent-built shared env at /mnt/sci_envs/fpga_toolchain/envs/hgq from /mnt source (micromamba + pip jax[cuda13] + hgq2/da4ml built from source); prerequisite for all repro tasks; non-thinking (thinking loops on env discovery)
+repro_v1_ref,1conv_simple,none,gemma4-thinking,PASS,1,n/a,1024,3,unconstrained 1-conv -> bit-exact streaming RTL (both modes); independently re-verified with fresh seed
+repro_v3_ref,2conv_einsum,none,gemma4-thinking,PASS,1,n/a,1280,6,unconstrained 2-conv+per-patch-einsum tail (hard topology); Stage C 1280/1280
+repro_v1_opt,1conv_simple,3000,gemma4-thinking,PASS,1,20234,1280,13,PID+Pareto; far below unconstrained ~500k (under 50k bar)
+repro_v3_opt,2conv_einsum,3000,gemma4-thinking,PASS,1,3000,1280,4,PID+Pareto + einsum tail; budget met
+repro_v1_opt2,1conv_simple,1500,gemma4-thinking,PASS,2,1481,1280,7,tight 1.5K budget reached (1481)
+repro_v3_opt2,2conv_einsum,1500,gemma4-thinking,PASS,1,1395,1280,13,tight 1.5K budget reached (1395)

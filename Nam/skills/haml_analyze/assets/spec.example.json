@@ -1,0 +1,45 @@
+{
+  "task": "drift-chamber waveform -> hit-count regression (streaming FPGA inference)",
+  "data": {
+    "dir": "/mnt/sci_shared/data",
+    "train": "train_v3.h5",
+    "val": "val_v3.h5",
+    "x_key": "waveform500",
+    "y_key": "predict500",
+    "y_kind": "scalar",
+    "y_transform": "PRO_Y (10-bit re_digi of predict500); for per-patch: 20-patch sums of is_primary3000[:,:500]",
+    "n_train": 500000,
+    "n_val": 500000
+  },
+  "input": {
+    "length": 500,
+    "bw_inp": 10,
+    "vmin": -0.2,
+    "vmax": 40.0,
+    "digitize": "re_digi(x, vmin, vmax, bits)  -> integer ADC codes [0, 2^bw_inp)"
+  },
+  "output": {
+    "kind": "scalar",
+    "n_out": 1,
+    "note": "kind=scalar (1/sample) or per_patch (N_PATCHES/sample). Output signedness + exact bit width come from the trained model's output quantizer (read off comb_full at convert time, NOT chosen here)."
+  },
+  "stream": {
+    "patch_size": 25,
+    "n_patches": 20,
+    "ii": 20,
+    "conv2_window": 1,
+    "note": "II = length/patch_size. conv2_window>1 ONLY if a second conv with padding='same' mixes neighbor patches (=> 3-window shift buffer + per-patch einsum tail)."
+  },
+  "eval": {
+    "metric": "mae",
+    "golden": "comb_full",
+    "note": "Golden = da4ml comb_full.predict_raw (whole model, bit-exact to keras), sign-corrected. The RTL must reproduce it bit-exactly in no-pause AND backpressured modes."
+  },
+  "targets": {
+    "ebops": null,
+    "perf_mae": null,
+    "note": "Set ebops to constrain FPGA cost (LUT/DSP) via BetaPID+ParetoFront; set perf_mae as the accuracy floor. null/null => plain unconstrained training."
+  },
+  "topology": "1conv_simple",
+  "_topology_options": ["1conv_simple (-> per-window split, scalar)", "2conv_einsum (-> kernel + 3-window mid + per-patch einsum tail)"]
+}
